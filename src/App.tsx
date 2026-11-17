@@ -1,0 +1,73 @@
+import { useEffect, useRef, useState } from "react";
+import { AppContext } from "./app-context.tsx";
+import { reduce, type Action } from "./engine/session.ts";
+import { playRoundCue } from "./lib/sound.ts";
+import { loadStore, saveStore } from "./storage.ts";
+import { CheckInScreen } from "./screens/CheckInScreen.tsx";
+import { HomeScreen } from "./screens/HomeScreen.tsx";
+import { PlayScreen } from "./screens/PlayScreen.tsx";
+import { EditPlayerScreen, RosterScreen } from "./screens/RosterScreen.tsx";
+import { LogScreen, PastScreen, StatsScreen } from "./screens/ReviewScreens.tsx";
+import { SettingsScreen } from "./screens/SettingsScreen.tsx";
+
+export default function App() {
+  const [store, setStore] = useState(loadStore);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [saveFailed, setSaveFailed] = useState(false);
+  const storeRef = useRef(store);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 2800);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  const dispatch = (action: Action) => {
+    const result = reduce(storeRef.current, action);
+    storeRef.current = result.store;
+    setStore(result.store);
+    setError(result.error ?? null);
+    if (result.notice) setNotice(result.notice);
+    if (result.cue) playRoundCue(result.store.settings);
+    setSaveFailed(!saveStore(result.store));
+  };
+
+  const view = store.view.name;
+  return (
+    <AppContext.Provider value={{ store, dispatch, error, notice }}>
+      <div className="min-h-dvh bg-bench text-ink">
+        <div className="mx-auto min-h-dvh w-full max-w-[480px] bg-paper shadow-[0_0_0_2px_#1a140c]" data-screen={view}>
+          {(error || notice || saveFailed) && (
+            <div className="pointer-events-none fixed inset-x-0 bottom-0 z-30 mx-auto flex w-full max-w-[480px] flex-col gap-2 px-3 pb-[max(12px,env(safe-area-inset-bottom))]">
+              {saveFailed && (
+                <p role="alert" className="rounded-xl border-2 border-ink bg-bad px-3 py-3 font-bold">
+                  This phone couldn't save. Free a little storage and try the last tap again.
+                </p>
+              )}
+              {error && (
+                <p role="alert" className="rounded-xl border-2 border-ink bg-bad px-3 py-3 font-bold">
+                  {error}
+                </p>
+              )}
+              {notice && (
+                <p role="status" className="rounded-xl border-2 border-ink bg-ball px-3 py-3 font-bold">
+                  {notice}
+                </p>
+              )}
+            </div>
+          )}
+          {view === "home" && <HomeScreen />}
+          {view === "roster" && <RosterScreen />}
+          {view === "edit" && <EditPlayerScreen />}
+          {view === "checkin" && <CheckInScreen />}
+          {view === "play" && <PlayScreen />}
+          {view === "stats" && <StatsScreen />}
+          {view === "log" && <LogScreen />}
+          {view === "past" && <PastScreen />}
+          {view === "settings" && <SettingsScreen />}
+        </div>
+      </div>
+    </AppContext.Provider>
+  );
+}
