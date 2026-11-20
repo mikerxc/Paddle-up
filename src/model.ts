@@ -4,7 +4,11 @@ export interface Player {
   id: string;
   name: string;
   gender: Gender;
-  /** DUPR-style rating, one decimal from 2.0 to 5.5. */
+  /**
+   * Hidden skill used only for fair pairing. Learned from finished games and
+   * clamped from 2.0 to 5.5. Manual edits use 0.1 steps; learned values keep
+   * a little extra precision so small updates are not lost.
+   */
   skill: number;
   createdAt: number;
 }
@@ -16,8 +20,10 @@ export interface Settings {
   winBy: number;
   /** How many rounds to lay out when a session starts. */
   initialRounds: number;
-  /** Skill filled in on the new-player form. */
+  /** Hidden skill filled in for a new player. */
   defaultSkill: number;
+  /** Host-only. When false, skill numbers stay off every screen. */
+  hostSkills: boolean;
   soundOn: boolean;
   vibrateOn: boolean;
 }
@@ -74,9 +80,19 @@ export interface Session {
   salt: number;
   attendance: Attendance[];
   rounds: Round[];
-  paused: boolean;
+  /** Legacy field from older saves. Ignored. */
+  paused?: boolean;
   rules: SessionRules;
   log: LogEntry[];
+}
+
+/** A quiet record of hidden-skill changes. Shown nowhere in the app. */
+export interface SkillEvent {
+  at: number;
+  playerId: string;
+  before: number;
+  after: number;
+  source: "game" | "manual";
 }
 
 export type View =
@@ -96,6 +112,7 @@ export interface Snapshot {
   checkedIn: string[];
   active: Session | null;
   past?: Session[];
+  skillLog?: SkillEvent[];
   view: View;
 }
 
@@ -105,6 +122,8 @@ export interface Store {
   checkedIn: string[];
   active: Session | null;
   past: Session[];
+  /** Hidden skill changes. Kept for backup, never rendered. */
+  skillLog: SkillEvent[];
   undo: Snapshot[];
   view: View;
 }
@@ -123,16 +142,23 @@ export const defaultSettings: Settings = {
   winBy: 2,
   initialRounds: 4,
   defaultSkill: 2.0,
+  hostSkills: false,
   soundOn: true,
   vibrateOn: true,
 };
 
+export function clampRating(value: number): number {
+  if (!Number.isFinite(value)) return defaultSettings.defaultSkill;
+  const clamped = Math.min(SKILL_MAX, Math.max(SKILL_MIN, value));
+  return Math.round(clamped * 1000) / 1000;
+}
+
+/** Manual skill entry: one decimal, still inside the hidden rating bounds. */
 export function clampSkill(value: number): number {
   if (!Number.isFinite(value)) return defaultSettings.defaultSkill;
   const steps = Math.round(value / SKILL_STEP);
   const stepped = steps * SKILL_STEP;
-  const clamped = Math.min(SKILL_MAX, Math.max(SKILL_MIN, stepped));
-  return Math.round(clamped * 10) / 10;
+  return clampRating(stepped);
 }
 
 export function formatSkill(value: number): string {
@@ -164,6 +190,7 @@ export function sanitizeSettings(input: Partial<Settings> | undefined): Settings
     winBy: clampInt(raw.winBy ?? defaultSettings.winBy, 1, 5),
     initialRounds: clampInt(raw.initialRounds ?? defaultSettings.initialRounds, 1, 12),
     defaultSkill: clampSkill(raw.defaultSkill ?? defaultSettings.defaultSkill),
+    hostSkills: raw.hostSkills === true,
     soundOn: raw.soundOn ?? defaultSettings.soundOn,
     vibrateOn: raw.vibrateOn ?? defaultSettings.vibrateOn,
   };

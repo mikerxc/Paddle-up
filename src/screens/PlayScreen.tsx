@@ -38,9 +38,6 @@ export function PlayScreen() {
         </p>
       </header>
       <div className="flex flex-col gap-3 px-3 py-3 pb-28">
-        {session.paused && (
-          <p className="rounded-xl border-2 border-ink bg-ball px-3 py-3 text-center text-lg font-black">Round paused</p>
-        )}
         <div className="flex items-center justify-between gap-2 rounded-xl border-2 border-ink bg-card px-3 py-2">
           <span className="font-black">Courts</span>
           <div className="flex items-center gap-2">
@@ -106,7 +103,7 @@ export function PlayScreen() {
         ) : (
           <section className="rounded-2xl border-2 border-ink bg-card p-3">
             <h2 className="text-xl font-black">Planned rounds are done.</h2>
-            <p className="mt-1 font-semibold">Next round rebalances partners, opponents, and sit-outs. Keep going until you end the night.</p>
+            <p className="mt-1 font-semibold">Next round keeps the teams balanced and rotates who sits. Keep going until you end the night.</p>
           </section>
         )}
         {upcoming.length > 0 && (
@@ -138,14 +135,11 @@ export function PlayScreen() {
             </Button>
           )}
           <div className="grid grid-cols-2 gap-2">
-            <Button size="lg" variant="yellow" data-testid="pause-round" onClick={() => dispatch({ type: session.paused ? "resume" : "pause" })}>
-              {session.paused ? "Resume" : "Pause"}
-            </Button>
             <Button size="lg" variant="secondary" data-testid="reshuffle" onClick={() => dispatch({ type: "reshuffle" })}>
               Reshuffle
             </Button>
             <Button size="lg" variant="secondary" data-testid="arrive-open" onClick={() => setArriveOpen(true)}>
-              Arrival
+              Add Player
             </Button>
             {round && (
               <Button size="lg" variant="secondary" data-testid="add-round" onClick={() => dispatch({ type: "add-rounds", count: 1 })}>
@@ -225,9 +219,7 @@ export function PlayScreen() {
 }
 
 function labelFor(players: Player[], id: string) {
-  const player = players.find((item) => item.id === id);
-  if (!player) return "Player";
-  return `${player.name} · ${genderMark(player.gender)} ${player.skill.toFixed(1)}`;
+  return players.find((item) => item.id === id)?.name ?? "Player";
 }
 
 function MatchCard({
@@ -251,25 +243,49 @@ function MatchCard({
   const pattern = matchPattern(genderOf, match.teamA, match.teamB);
   const status = scoreStatus(match.scoreA, match.scoreB, pointsToWin, winBy);
   const issue = finalScoreIssue(match.scoreA, match.scoreB, pointsToWin, winBy);
+  const tone = status === "final" ? "bg-good" : status === "need-margin" || status === "overshot" ? "bg-bad" : "bg-[#083820] text-white";
   return (
-    <section className="overflow-hidden rounded-2xl border-2 border-ink bg-card" data-testid={`court-${match.court}`}>
-      <h2 className="bg-court px-3 py-2 text-lg font-black tracking-wide text-white">COURT {match.court}</h2>
-      <TeamBlock players={players} ids={match.teamA} score={match.scoreA} side="A" matchId={match.id} onPlayer={onPlayer} onNudge={onNudge} onOpenPad={onOpenPad} />
-      <p className="py-1 text-center text-sm font-black tracking-widest">VS</p>
-      <TeamBlock players={players} ids={match.teamB} score={match.scoreB} side="B" matchId={match.id} onPlayer={onPlayer} onNudge={onNudge} onOpenPad={onOpenPad} />
-      <p className={`px-3 py-2 text-base font-black ${status === "final" ? "bg-good" : status === "need-margin" || status === "overshot" ? "bg-bad" : ""}`} data-testid={`score-status-${match.court}`}>
+    <section className="overflow-hidden rounded-3xl border-2 border-ink bg-[#0c4f2e] shadow-[0_6px_0_#1a140c]" data-testid={`court-${match.court}`}>
+      <h2 className="bg-[#083820] px-3 py-2 text-center text-sm font-black tracking-[0.2em] text-ball uppercase">Court {match.court}</h2>
+      <div className="court-surface">
+        <CourtSide
+          edge="far"
+          players={players}
+          ids={match.teamA}
+          score={match.scoreA}
+          side="A"
+          matchId={match.id}
+          onPlayer={onPlayer}
+          onNudge={onNudge}
+          onOpenPad={onOpenPad}
+        />
+        <div className="court-net" role="separator" aria-label="Net" />
+        <CourtSide
+          edge="near"
+          players={players}
+          ids={match.teamB}
+          score={match.scoreB}
+          side="B"
+          matchId={match.id}
+          onPlayer={onPlayer}
+          onNudge={onNudge}
+          onOpenPad={onOpenPad}
+        />
+      </div>
+      <p className={`px-3 py-2 text-base font-black ${tone}`} data-testid={`score-status-${match.court}`}>
         {status === "final" && `Game. Win by ${winBy}.`}
         {status === "need-margin" && `Win by ${winBy}. Keep playing.`}
-        {status === "overshot" && issue}
+        {status === "overshot" && `Check this score. ${issue}`}
         {status === "playing" && "In progress"}
         {status === "empty" && "No points yet"}
-        {pattern === "women_vs_men" && " · Women vs men. Swap if you can."}
+        {pattern === "women_vs_men" && " Women vs men. Swap if you can."}
       </p>
     </section>
   );
 }
 
-function TeamBlock({
+function CourtSide({
+  edge,
   players,
   ids,
   score,
@@ -279,6 +295,7 @@ function TeamBlock({
   onNudge,
   onOpenPad,
 }: {
+  edge: "far" | "near";
   players: Player[];
   ids: [string, string];
   score: number;
@@ -288,28 +305,67 @@ function TeamBlock({
   onNudge: (side: "A" | "B", delta: number) => void;
   onOpenPad: (side: "A" | "B") => void;
 }) {
-  return (
-    <div className="px-3 py-2">
-      <div className="flex flex-col gap-2">
-        {ids.map((id) => (
-          <button key={id} type="button" className="min-h-12 rounded-xl border-2 border-ink bg-paper px-3 text-left text-lg font-black" onClick={() => onPlayer(id)}>
-            {labelFor(players, id)}
-          </button>
-        ))}
-      </div>
-      <div className="mt-2 flex items-center justify-between gap-2">
-        <button type="button" className="min-h-14 min-w-20 rounded-xl border-2 border-ink bg-paper text-5xl font-black tabular-nums" aria-label={`Set score ${score}`} onClick={() => onOpenPad(side)}>
-          {score}
+  const names = (
+    <div className="grid grid-cols-2 gap-2">
+      {ids.map((id) => (
+        <button
+          key={id}
+          type="button"
+          className="min-h-11 truncate rounded-xl border-2 border-ink bg-paper px-2 text-center text-base font-black text-ink"
+          onClick={() => onPlayer(id)}
+        >
+          {labelFor(players, id)}
         </button>
-        <div className="flex gap-2">
-          <Button variant="secondary" size="lg" className="w-16 text-3xl" data-testid={`score-minus-${matchId}-${side}`} aria-label="Minus one" onClick={() => onNudge(side, -1)}>
-            −
-          </Button>
-          <Button variant="default" size="lg" className="w-16 text-3xl" data-testid={`score-plus-${matchId}-${side}`} aria-label="Plus one" onClick={() => onNudge(side, 1)}>
-            +
-          </Button>
-        </div>
+      ))}
+    </div>
+  );
+  const scoreBlock = (
+    <div className="flex flex-col items-center justify-center gap-1.5 py-0.5">
+      <button
+        type="button"
+        className="min-h-12 min-w-[5.25rem] rounded-2xl border-2 border-white/90 bg-[#083820] px-3 text-4xl font-black tabular-nums text-white"
+        aria-label={`Set score ${score}`}
+        onClick={() => onOpenPad(side)}
+      >
+        {score}
+      </button>
+      <div className="flex flex-col gap-1.5">
+        <Button
+          variant="yellow"
+          className="h-12 w-[4.5rem] text-3xl"
+          data-testid={`score-plus-${matchId}-${side}`}
+          aria-label="Plus one"
+          onClick={() => onNudge(side, 1)}
+        >
+          +
+        </Button>
+        <Button
+          variant="secondary"
+          className="h-12 w-[4.5rem] text-3xl"
+          data-testid={`score-minus-${matchId}-${side}`}
+          aria-label="Minus one"
+          onClick={() => onNudge(side, -1)}
+        >
+          −
+        </Button>
       </div>
+    </div>
+  );
+  return (
+    <div className={`court-half ${edge === "far" ? "court-half-far" : "court-half-near"}`}>
+      {edge === "far" ? (
+        <>
+          {names}
+          {scoreBlock}
+          <div className="court-kitchen" />
+        </>
+      ) : (
+        <>
+          <div className="court-kitchen" />
+          {scoreBlock}
+          {names}
+        </>
+      )}
     </div>
   );
 }
@@ -341,7 +397,7 @@ function PlayerSheet({
   const attendance = session.attendance.find((att) => att.playerId === playerId);
   const alreadyLeaving = attendance?.leftAtRound !== null && attendance?.leftAtRound !== undefined;
   return (
-    <Sheet open={!!player && !!round} onOpenChange={(open) => !open && onClose()} title={player?.name ?? "Player"} description={player ? `${genderMark(player.gender)} · ${player.skill.toFixed(1)}` : undefined}>
+    <Sheet open={!!player && !!round} onOpenChange={(open) => !open && onClose()} title={player?.name ?? "Player"} description={player ? (player.gender === "female" ? "Female" : "Male") : undefined}>
       {player && playerId && round && (
         <div className="flex flex-col gap-2">
           {onCourt &&
@@ -400,12 +456,12 @@ function ArriveSheet({
   const here = new Set(session.attendance.filter((att) => att.leftAtRound === null).map((att) => att.playerId));
   const options = players.filter((player) => !here.has(player.id));
   return (
-    <Sheet open={open} onOpenChange={(next) => !next && onClose()} title="Who just walked in?" description="They join the normal rotation, even with the group. No skip ahead, and no extra sits for the rounds they missed.">
+    <Sheet open={open} onOpenChange={(next) => !next && onClose()} title="Add a player" description="They join the rotation from here, even with the group. No extra sits for the rounds they missed.">
       <div className="flex flex-col gap-2">
-        {options.length === 0 && <p className="font-semibold">Everyone on the roster is already here.</p>}
+        {options.length === 0 && <p className="font-semibold">Everyone in Players is already here.</p>}
         {options.map((player) => (
           <Button key={player.id} size="lg" full variant="secondary" data-testid={`arrive-${player.id}`} onClick={() => onArrive(player.id)}>
-            {player.name} · {genderMark(player.gender)} {player.skill.toFixed(1)}
+            {player.name} · {genderMark(player.gender)}
           </Button>
         ))}
         <Button size="lg" full data-testid="arrive-new" onClick={onCreate}>

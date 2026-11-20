@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "../model.ts";
 import type { Player, Store } from "../model.ts";
-import { activeRound, createInitialStore, presentIds, reduce, recompute, standings } from "./session.ts";
+import { activeRound, createInitialStore, presentIds, reduce, recompute, roundLineupKey, sessionRecap, standings } from "./session.ts";
 import { matchPattern } from "./pairing.ts";
 
 function makePlayers(count: number): Player[] {
@@ -30,7 +30,7 @@ function must<T>(value: T | null | undefined, label: string): T {
 }
 
 describe("session defaults", () => {
-  it("starts from the house rules the group confirmed", () => {
+  it("starts from the confirmed defaults", () => {
     expect(defaultSettings.courts).toBe(2);
     expect(defaultSettings.pointsToWin).toBe(11);
     expect(defaultSettings.winBy).toBe(2);
@@ -146,15 +146,28 @@ describe("scores", () => {
     expect(step.cue).toBe(true);
   });
 
-  it("will not finish while the round is paused", () => {
-    let step = reduce(ready(4, 1), { type: "start-session" }, 10);
+  it("learns a hidden skill from a finished game and undoes it with the round", () => {
+    const base = ready(4, 1);
+    base.players = base.players.map((player) => ({ ...player, skill: 4 }));
+    let step = reduce(base, { type: "start-session" }, 10);
     const match = must(activeRound(must(step.store.active, "s"))?.matches[0], "m");
+    const before = new Map(step.store.players.map((player) => [player.id, player.skill]));
     step = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 11 }, 11);
-    step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 7 }, 12);
-    step = reduce(step.store, { type: "pause" }, 13);
-    expect(reduce(step.store, { type: "finish-round" }, 14).error).toMatch(/Resume/);
-    step = reduce(step.store, { type: "resume" }, 15);
-    expect(reduce(step.store, { type: "finish-round" }, 16).error).toBeUndefined();
+    step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 3 }, 12);
+    expect(step.store.players.every((player) => player.skill === 4)).toBe(true);
+    const finished = reduce(step.store, { type: "finish-round" }, 13);
+    expect(finished.error).toBeUndefined();
+    const skill = (id: string) => finished.store.players.find((player) => player.id === id)?.skill ?? 0;
+    expect(skill(match.teamA[0])).toBeGreaterThan(4);
+    expect(skill(match.teamA[1])).toBeGreaterThan(4);
+    expect(skill(match.teamB[0])).toBeLessThan(4);
+    expect(skill(match.teamB[1])).toBeLessThan(4);
+    expect(finished.store.skillLog.length).toBeGreaterThan(0);
+    const undone = reduce(finished.store, { type: "undo" }, 14);
+    for (const [id, rating] of before) {
+      expect(undone.store.players.find((player) => player.id === id)?.skill).toBe(rating);
+    }
+    expect(undone.store.skillLog).toEqual([]);
   });
 });
 
@@ -232,7 +245,68 @@ describe("arrivals and departures", () => {
   });
 });
 
+function lineup(store: Store) {
+  return store.active?.rounds.map((round) => roundLineupKey(round)) ?? [];
+}
+
 describe("reshuffle", () => {
+  it("re-rolls the open round and every later round when the score is still 0–0", () => {
+    const players = makePlayers(8).map((player) => ({ ...player, skill: 4 }));
+    let step = reduce(
+      {
+        ...createInitialStore(),
+        players,
+        checkedIn: players.map((player) => player.id),
+        settings: { ...defaultSettings, courts: 2, initialRounds: 3 },
+      },
+      { type: "start-session" },
+      10,
+    );
+    const before = must(step.store.active, "before");
+    const beforeKeys = lineup(step.store);
+    const sits = before.rounds.map((round) => [...round.sittingOut]);
+    step = reduce(step.store, { type: "reshuffle" }, 11);
+    const after = must(step.store.active, "after");
+    expect(after.rounds).toHaveLength(before.rounds.length);
+    expect(after.rounds.map((round) => round.status)).toEqual(before.rounds.map((round) => round.status));
+    after.rounds.forEach((round, index) => {
+      expect(roundLineupKey(round)).not.toBe(beforeKeys[index]);
+      expect(round.sittingOut).toEqual(sits[index]);
+      expect(round.matches.every((match) => match.scoreA === 0 && match.scoreB === 0)).toBe(true);
+    });
+    expect(step.notice).toMatch(/Open rounds reshuffled/);
+  });
+
+  it("leaves a started round alone and re-rolls only the rounds after it", () => {
+    const players = makePlayers(8).map((player) => ({ ...player, skill: 4 }));
+    let step = reduce(
+      {
+        ...createInitialStore(),
+        players,
+        checkedIn: players.map((player) => player.id),
+        settings: { ...defaultSettings, courts: 2, initialRounds: 3 },
+      },
+      { type: "start-session" },
+      20,
+    );
+    const current = must(activeRound(must(step.store.active, "s")), "current");
+    const liveMatch = must(current.matches[0], "match");
+    step = reduce(step.store, { type: "nudge-score", matchId: liveMatch.id, side: "A", delta: 1 }, 21);
+    const started = structuredClone(must(step.store.active, "started").rounds[0]);
+    const laterBefore = must(step.store.active, "later").rounds.slice(1).map((round) => roundLineupKey(round));
+    step = reduce(step.store, { type: "reshuffle" }, 22);
+    const after = must(step.store.active, "after");
+    expect(after.rounds[0]).toEqual(started);
+    const laterAfter = after.rounds.slice(1).map((round) => roundLineupKey(round));
+    expect(laterAfter.length).toBe(laterBefore.length);
+    expect(laterAfter.some((key, index) => key !== laterBefore[index])).toBe(true);
+    for (const round of after.rounds.slice(1)) {
+      expect(round.status).toBe("pending");
+      expect(round.matches.every((match) => match.scoreA === 0 && match.scoreB === 0)).toBe(true);
+    }
+    expect(step.notice).toMatch(/Later rounds reshuffled/);
+  });
+
   it("keeps completed rounds and drops a player who has left", () => {
     let step = reduce(ready(8, 1), { type: "start-session" }, 10);
     const first = must(activeRound(must(step.store.active, "s")), "r");
@@ -272,5 +346,26 @@ describe("reshuffle", () => {
         expect(matchPattern(genderOf, match.teamA, match.teamB)).not.toBe("women_vs_men");
       }
     }
+  });
+});
+
+describe("session recap", () => {
+  it("copies records, games, and point diff without hidden ratings", () => {
+    let step = reduce(ready(4, 1), { type: "start-session" }, 10);
+    const match = must(activeRound(must(step.store.active, "s"))?.matches[0], "m");
+    step = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 11 }, 11);
+    step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 5 }, 12);
+    step = reduce(step.store, { type: "finish-round" }, 13);
+    step = reduce(step.store, { type: "end-session" }, 14);
+    const session = must(step.store.past[0], "saved");
+    const text = sessionRecap(session, step.store.players);
+    expect(text).toContain(session.title);
+    expect(text).toContain("1-0");
+    expect(text).toContain("0-1");
+    expect(text).toContain("1 played");
+    expect(text).toContain("+6");
+    expect(text).toContain("-6");
+    expect(text).not.toMatch(/DUPR/i);
+    expect(text).not.toMatch(/\b[2-5]\.\d\b/);
   });
 });

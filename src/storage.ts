@@ -4,6 +4,7 @@ import {
   type Player,
   type Session,
   type Settings,
+  type SkillEvent,
   type Snapshot,
   type Store,
   type View,
@@ -42,6 +43,18 @@ function isSession(value: unknown): value is Session {
   return typeof session.id === "string" && Array.isArray(session.rounds) && Array.isArray(session.attendance) && Array.isArray(session.log);
 }
 
+function isSkillEvent(value: unknown): value is SkillEvent {
+  if (!value || typeof value !== "object") return false;
+  const event = value as SkillEvent;
+  return (
+    typeof event.at === "number" &&
+    typeof event.playerId === "string" &&
+    typeof event.before === "number" &&
+    typeof event.after === "number" &&
+    (event.source === "game" || event.source === "manual")
+  );
+}
+
 function isView(value: unknown): value is View {
   if (!value || typeof value !== "object") return false;
   const view = value as View;
@@ -71,8 +84,69 @@ export function normalizeStore(value: unknown): Store {
     checkedIn: Array.isArray(raw.checkedIn) ? raw.checkedIn.filter((id): id is string => typeof id === "string") : [],
     active: isSession(raw.active) ? raw.active : null,
     past: Array.isArray(raw.past) ? raw.past.filter(isSession) : [],
+    skillLog: Array.isArray(raw.skillLog) ? raw.skillLog.filter(isSkillEvent).slice(-2000) : [],
     undo: Array.isArray(raw.undo) ? (raw.undo as Snapshot[]) : [],
     view,
+  };
+}
+
+export interface BackupFile {
+  kind: "paddle-up-backup";
+  version: 1;
+  exportedAt: number;
+  players: Player[];
+  settings: Settings;
+  past: Session[];
+  active: Session | null;
+  checkedIn: string[];
+  /** Current hidden ratings and every recorded change. */
+  skillLog: SkillEvent[];
+}
+
+export function buildBackup(store: Store, now = Date.now()): BackupFile {
+  return {
+    kind: "paddle-up-backup",
+    version: 1,
+    exportedAt: now,
+    players: store.players,
+    settings: store.settings,
+    past: store.past,
+    active: store.active,
+    checkedIn: store.checkedIn,
+    skillLog: store.skillLog,
+  };
+}
+
+export function parseBackup(value: unknown): { ok: true; backup: BackupFile } | { ok: false; error: string } {
+  if (!value || typeof value !== "object") return { ok: false, error: "That file isn't a Paddle Up backup." };
+  const raw = value as Partial<BackupFile>;
+  if (raw.kind !== "paddle-up-backup" || raw.version !== 1) {
+    return { ok: false, error: "That file isn't a Paddle Up backup." };
+  }
+  if (!Array.isArray(raw.players) || !raw.players.every(isPlayer)) {
+    return { ok: false, error: "The backup's player list is missing or unreadable." };
+  }
+  if (raw.active !== null && raw.active !== undefined && !isSession(raw.active)) {
+    return { ok: false, error: "The backup's live session is unreadable." };
+  }
+  if (!Array.isArray(raw.past) || !raw.past.every(isSession)) {
+    return { ok: false, error: "The backup's past sessions are unreadable." };
+  }
+  const skillLog = Array.isArray(raw.skillLog) ? raw.skillLog.filter(isSkillEvent) : [];
+  const checkedIn = Array.isArray(raw.checkedIn) ? raw.checkedIn.filter((id): id is string => typeof id === "string") : [];
+  return {
+    ok: true,
+    backup: {
+      kind: "paddle-up-backup",
+      version: 1,
+      exportedAt: typeof raw.exportedAt === "number" ? raw.exportedAt : Date.now(),
+      players: raw.players,
+      settings: sanitizeSettings(raw.settings),
+      past: raw.past,
+      active: raw.active ?? null,
+      checkedIn,
+      skillLog,
+    },
   };
 }
 

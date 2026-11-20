@@ -11,8 +11,12 @@ export function CheckInScreen() {
   const courts = store.settings.courts;
   const count = players.filter((player) => selected.has(player.id)).length;
   return (
-    <Screen title="Who's here" onBack={() => dispatch({ type: "nav", view: { name: "home" } })}>
-      <p className="text-lg font-semibold">Tap everyone who showed up. You won't type these names again.</p>
+    <Screen title="Setup Games" onBack={() => dispatch({ type: "nav", view: { name: "home" } })}>
+      <div className="rounded-2xl border-2 border-ink bg-court px-3 py-3 text-white">
+        <p className="text-xs font-black tracking-[0.16em] text-ball uppercase">Fair matchups</p>
+        <p className="mt-1 text-xl font-black leading-tight">Who's playing tonight?</p>
+        <p className="mt-1 text-base font-semibold">Tap everyone who showed up. Teams stay balanced across the courts.</p>
+      </div>
       <div className="grid grid-cols-2 gap-2">
         <Button size="lg" variant={courts === 1 ? "default" : "secondary"} data-testid="courts-1" onClick={() => dispatch({ type: "set-settings", patch: { courts: 1 } })}>
           1 court
@@ -43,9 +47,9 @@ export function CheckInScreen() {
       </div>
       {players.length === 0 ? (
         <div className="rounded-2xl border-2 border-ink bg-card p-3">
-          <p className="text-lg font-black">Add people to the roster first.</p>
+          <p className="text-lg font-black">Add people in Players first.</p>
           <Button className="mt-3" full onClick={() => dispatch({ type: "nav", view: { name: "roster" } })}>
-            Open roster
+            Open Players
           </Button>
         </div>
       ) : (
@@ -63,7 +67,7 @@ export function CheckInScreen() {
                 >
                   <span className="text-lg font-black">{player.name}</span>
                   <span className="text-base font-bold">
-                    {on ? "Here" : "Out"} · {genderMark(player.gender)} {player.skill.toFixed(1)}
+                    {on ? "Here" : "Out"} · {genderMark(player.gender)}
                   </span>
                 </button>
               </li>

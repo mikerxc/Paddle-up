@@ -1,6 +1,7 @@
 import {
   byName,
   clampInt,
+  clampRating,
   clampSkill,
   defaultSettings,
   MAX_SCORE,
@@ -17,18 +18,22 @@ import {
   type Round,
   type Session,
   type Settings,
+  type SkillEvent,
   type Snapshot,
   type Store,
   type View,
 } from "../model.ts";
 import { finalScoreIssue, isFinalScore } from "./scoring.ts";
+import { learnFromRound } from "./skill.ts";
 import {
   applyRound,
+  assignmentKey,
   emptyLedger,
   newSched,
   planRound,
   type EnginePlayer,
   type Ledger,
+  type PlannedMatch,
   type RoundPlan,
   type SchedState,
 } from "./pairing.ts";
@@ -54,9 +59,8 @@ export type Action =
   | { type: "nudge-score"; matchId: string; side: "A" | "B"; delta: number }
   | { type: "set-score"; matchId: string; side: "A" | "B"; score: number }
   | { type: "swap"; roundId: string; outId: string; inId: string }
-  | { type: "pause" }
-  | { type: "resume" }
   | { type: "reshuffle" }
+  | { type: "import-backup"; players: Player[]; settings: Settings; past: Session[]; active: Session | null; checkedIn: string[]; skillLog: SkillEvent[] }
   | { type: "add-rounds"; count: number }
   | { type: "arrive"; playerId: string }
   | { type: "depart"; playerId: string }
@@ -72,6 +76,7 @@ export function createInitialStore(): Store {
     checkedIn: [],
     active: null,
     past: [],
+    skillLog: [],
     undo: [],
     view: { name: "home" },
   };
@@ -152,19 +157,37 @@ function fromPlan(plan: RoundPlan, status: Round["status"]): Round {
   };
 }
 
-function planFrom(session: Session, players: readonly Player[], startNumber: number, count: number): RoundPlan[] {
+function planFrom(
+  session: Session,
+  players: readonly Player[],
+  startNumber: number,
+  count: number,
+  variety = 0,
+  avoid?: ReadonlyMap<number, string>,
+): RoundPlan[] {
   let { sched, ledger } = recompute(session, startNumber - 1);
   const plans: RoundPlan[] = [];
   for (let offset = 0; offset < count; offset += 1) {
     const roundNumber = startNumber + offset;
     const eligible = eligiblePlayers(session, players, roundNumber);
-    const plan = planRound(eligible, sched, ledger, session.rules.courts, roundNumber, session.salt);
+    const plan = planRound(eligible, sched, ledger, session.rules.courts, roundNumber, session.salt, {
+      variety,
+      avoidKey: avoid?.get(roundNumber) ?? "",
+    });
     plans.push(plan);
     const applied = applyRound(sched, ledger, plan);
     sched = applied.sched;
     ledger = applied.ledger;
   }
   return plans;
+}
+
+function matchKey(match: { teamA: [string, string]; teamB: [string, string]; court: number }): PlannedMatch {
+  return { court: match.court, teamA: match.teamA, teamB: match.teamB };
+}
+
+export function roundLineupKey(round: Round): string {
+  return assignmentKey(round.matches.map(matchKey));
 }
 
 function hasScores(round: Round): boolean {
@@ -186,6 +209,7 @@ function takeSnapshot(store: Store, includePast: boolean): Snapshot {
     settings: structuredClone(store.settings),
     checkedIn: [...store.checkedIn],
     active: structuredClone(store.active),
+    skillLog: structuredClone(store.skillLog),
     view: structuredClone(store.view),
     ...(includePast ? { past: structuredClone(store.past) } : {}),
   };
@@ -250,7 +274,14 @@ function firstDroppedIndex(session: Session): number {
   return session.rounds.findIndex((round) => round.status !== "complete" && !hasScores(round));
 }
 
-function reshuffleUnlocked(session: Session, players: readonly Player[], at: number, reason: string): Session {
+function reshuffleUnlocked(
+  session: Session,
+  players: readonly Player[],
+  at: number,
+  reason: string,
+  variety = 0,
+  avoid?: ReadonlyMap<number, string>,
+): Session {
   const dropAt = firstDroppedIndex(session);
   if (dropAt === -1) return appendLog(session, at, reason);
   const kept = session.rounds.slice(0, dropAt);
@@ -258,12 +289,11 @@ function reshuffleUnlocked(session: Session, players: readonly Player[], at: num
   const activeDropped = session.rounds.slice(dropAt).some((round) => round.status === "active");
   const startNumber = (kept[kept.length - 1]?.number ?? 0) + 1;
   const draft = { ...session, rounds: kept };
-  const plans = planFrom(draft, players, startNumber, dropped);
+  const plans = planFrom(draft, players, startNumber, dropped, variety, avoid);
   const added = plans.map((plan, index) => fromPlan(plan, activeDropped && index === 0 ? "active" : "pending"));
   const rounds = [...kept, ...added];
-  const paused = activeDropped ? session.paused : session.paused && rounds.some((round) => round.status === "active");
   return appendLog(
-    { ...session, rounds, paused },
+    { ...session, rounds },
     at,
     `${reason} Rebuilt ${dropped} unplayed round${dropped === 1 ? "" : "s"}.`,
   );
@@ -456,12 +486,10 @@ export function reduce(store: Store, action: Action, now = Date.now()): StepResu
       return setScore(store, action, now);
     case "swap":
       return swap(store, action, now);
-    case "pause":
-      return pause(store, now);
-    case "resume":
-      return resume(store, now);
     case "reshuffle":
       return reshuffle(store, now);
+    case "import-backup":
+      return importBackup(store, action);
     case "add-rounds":
       return addRounds(store, action.count, now);
     case "arrive":
@@ -489,6 +517,7 @@ function undo(store: Store): StepResult {
     checkedIn: snap.checkedIn,
     active: snap.active,
     past: snap.past ?? store.past,
+    skillLog: snap.skillLog ?? store.skillLog,
     view: store.view,
     undo: store.undo.slice(0, -1),
   };
@@ -519,7 +548,7 @@ function addPlayer(
   if (action.arriveAfter && store.active) {
     const arrived = arrive(next, player.id, now);
     if (arrived.error || !arrived.store.active) return arrived;
-    return commit(store, arrived.store, { notice: `${player.name} is on the roster and folded into the session.` });
+    return commit(store, arrived.store, { notice: `${player.name} is saved and added to the session.` });
   }
   return commit(store, next, { notice: `${player.name} saved.` });
 }
@@ -532,17 +561,23 @@ function updatePlayer(
   const name = cleanName(action.name);
   if (!name) return fail(store, "Add a name first.");
   const existing = store.players.find((player) => player.id === action.playerId);
-  if (!existing) return fail(store, "That player is no longer on the roster.");
+  if (!existing) return fail(store, "That player is no longer in Players.");
+  const nextSkill = Math.abs(existing.skill - action.skill) < 0.0005 ? existing.skill : clampSkill(action.skill);
   const players = store.players.map((player) =>
-    player.id === action.playerId
-      ? { ...player, name, gender: action.gender, skill: clampSkill(action.skill) }
-      : player,
+    player.id === action.playerId ? { ...player, name, gender: action.gender, skill: nextSkill } : player,
   );
-  let next: Store = { ...store, players, view: { name: "roster" } };
+  let skillLog = store.skillLog;
+  if (existing.skill !== nextSkill) {
+    skillLog = [
+      ...skillLog,
+      { at: now, playerId: existing.id, before: existing.skill, after: nextSkill, source: "manual" as const },
+    ].slice(-2000);
+  }
+  let next: Store = { ...store, players, skillLog, view: { name: "roster" } };
   const session = store.active;
   const inSession = session?.attendance.some((att) => att.playerId === action.playerId && att.leftAtRound === null);
   if (session && inSession) {
-    const skillChanged = existing.skill !== clampSkill(action.skill) || existing.gender !== action.gender;
+    const skillChanged = existing.skill !== nextSkill || existing.gender !== action.gender;
     const updated = skillChanged ? reshuffleUnlocked({ ...session }, players, now, `Updated ${name}.`) : session;
     next = { ...next, active: updated, view: { name: "play" } };
   }
@@ -563,14 +598,14 @@ function deletePlayer(store: Store, playerId: string, _now: number): StepResult 
       checkedIn: store.checkedIn.filter((id) => id !== playerId),
       view: { name: "roster" },
     },
-    { notice: `${player.name} removed from the roster.` },
+    { notice: `${player.name} removed from Players.` },
   );
 }
 
 function loadSample(store: Store, sample: Player[], _now: number): StepResult {
   const known = new Set(store.players.map((player) => player.id));
   const additions = sample.filter((player) => !known.has(player.id));
-  if (additions.length === 0) return fail(store, "The sample group is already on the roster.");
+  if (additions.length === 0) return fail(store, "The sample group is already in Players.");
   return commit(
     store,
     { ...store, players: [...store.players, ...additions], view: { name: "roster" } },
@@ -579,7 +614,7 @@ function loadSample(store: Store, sample: Player[], _now: number): StepResult {
 }
 
 function toggleCheckin(store: Store, playerId: string): StepResult {
-  if (!store.players.some((player) => player.id === playerId)) return fail(store, "That player isn't on the roster.");
+  if (!store.players.some((player) => player.id === playerId)) return fail(store, "That player isn't in Players.");
   const checked = new Set(store.checkedIn);
   if (checked.has(playerId)) checked.delete(playerId);
   else checked.add(playerId);
@@ -623,7 +658,6 @@ function startSession(store: Store, now: number): StepResult {
     createdAt: now,
     endedAt: null,
     salt: now,
-    paused: false,
     rules: {
       courts: settings.courts,
       pointsToWin: settings.pointsToWin,
@@ -708,7 +742,7 @@ function swap(store: Store, action: Extract<Action, { type: "swap" }>, now: numb
   if (!inRound && !outPlaying) return fail(store, "Put a new player into an open court spot.");
   const incoming = store.players.find((player) => player.id === action.inId);
   const outgoing = store.players.find((player) => player.id === action.outId);
-  if (!incoming || !outgoing) return fail(store, "Pick someone from the roster.");
+  if (!incoming || !outgoing) return fail(store, "Pick someone from Players.");
   let attendance = session.attendance.map((att) => ({ ...att }));
   let att = attendance.find((item) => item.playerId === action.inId);
   const alreadyHere = att && att.leftAtRound === null && isEligible(att, round.number);
@@ -731,29 +765,44 @@ function swap(store: Store, action: Extract<Action, { type: "swap" }>, now: numb
   });
 }
 
-function pause(store: Store, now: number): StepResult {
-  const session = requireSession(store);
-  if (!session) return fail(store, "There's no live session.");
-  if (!activeRound(session)) return fail(store, "There's no round to pause.");
-  if (session.paused) return { store };
-  const next = appendLog({ ...session, paused: true }, now, "Paused the round.");
-  return commit(store, replaceSession(store, next), { notice: "Round paused." });
-}
-
-function resume(store: Store, now: number): StepResult {
-  const session = requireSession(store);
-  if (!session) return fail(store, "There's no live session.");
-  if (!session.paused) return { store };
-  const next = appendLog({ ...session, paused: false }, now, "Resumed the round.");
-  return commit(store, replaceSession(store, next), { notice: "Round resumed." });
+function hashVariety(salt: number, at: number, attempt: number): number {
+  let hash = 2166136261 ^ (salt >>> 0) ^ Math.imul(at >>> 0, 16777619) ^ Math.imul(attempt + 1, 374761393);
+  hash = Math.imul(hash ^ (hash >>> 16), 2246822519);
+  hash = (hash ^ (hash >>> 13)) >>> 0;
+  return hash || attempt + 1;
 }
 
 function reshuffle(store: Store, now: number): StepResult {
   const session = requireSession(store);
   if (!session) return fail(store, "There's no live session.");
   if (firstDroppedIndex(session) === -1) return fail(store, "Every round already has a score. Add a round instead.");
-  const next = reshuffleUnlocked(session, store.players, now, "Reshuffled.");
-  return commit(store, replaceSession(store, next), { notice: "Unplayed rounds reshuffled." });
+  const current = activeRound(session);
+  const started = !!current && hasScores(current);
+  const avoid = new Map<number, string>();
+  for (const round of session.rounds) {
+    if (round.status === "complete" || hasScores(round)) continue;
+    avoid.set(round.number, roundLineupKey(round));
+  }
+  let next = session;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const variety = hashVariety(session.salt, now, attempt);
+    next = reshuffleUnlocked(
+      session,
+      store.players,
+      now,
+      started ? "Reshuffled the later rounds." : "Reshuffled.",
+      variety,
+      avoid,
+    );
+    const changed = next.rounds.some((round) => {
+      const previous = avoid.get(round.number);
+      return previous !== undefined && roundLineupKey(round) !== previous;
+    });
+    if (changed || avoid.size === 0) break;
+  }
+  return commit(store, replaceSession(store, next), {
+    notice: started ? "Later rounds reshuffled." : "Open rounds reshuffled.",
+  });
 }
 
 function addRounds(store: Store, count: number, now: number): StepResult {
@@ -776,7 +825,7 @@ function arrive(store: Store, playerId: string, now: number): StepResult {
   const session = requireSession(store);
   if (!session) return fail(store, "Start a session before adding a late player.");
   const player = store.players.find((item) => item.id === playerId);
-  if (!player) return fail(store, "Add them to the roster first.");
+  if (!player) return fail(store, "Add them in Players first.");
   const existing = session.attendance.find((att) => att.playerId === playerId);
   if (existing && existing.leftAtRound === null) return fail(store, `${player.name} is already here.`);
   const entry = entryRoundNumber(session);
@@ -794,7 +843,7 @@ function arrive(store: Store, playerId: string, now: number): StepResult {
   let draft: Session = { ...session, attendance };
   draft = floorSchedule(draft, playerId, entry - 1);
   const checkedIn = store.checkedIn.includes(playerId) ? store.checkedIn : [...store.checkedIn, playerId];
-  draft = ensureUpcoming(draft, store.players, now, `${player.name} arrived.`);
+  draft = ensureUpcoming(draft, store.players, now, `${player.name} joined.`);
   return commit(store, { ...replaceSession(store, draft), checkedIn }, {
     notice: `${player.name} is in. First game comes before extra turns.`,
   });
@@ -827,7 +876,6 @@ function depart(store: Store, playerId: string, now: number): StepResult {
 function finishRound(store: Store, now: number): StepResult {
   const session = requireSession(store);
   if (!session) return fail(store, "There's no live session.");
-  if (session.paused) return fail(store, "Resume the round before finishing it.");
   const round = activeRound(session);
   if (!round) return fail(store, "Add another round when you're ready.");
   if (round.matches.length === 0) return fail(store, "Need 4 players on court to finish a round.");
@@ -850,7 +898,8 @@ function finishRound(store: Store, now: number): StepResult {
     const upcoming = rounds.find((item) => item.status === "active");
     if (upcoming) next = appendLog(next, now, `Round ${upcoming.number} is up. ${describeRound(store.players, upcoming, false)}`);
   }
-  return commit(store, replaceSession(store, next), {
+  const learned = learnFromRound(store.players, { ...finished, status: "complete" }, now, store.skillLog);
+  return commit(store, replaceSession({ ...store, players: learned.players, skillLog: learned.skillLog }, next), {
     cue: rounds.some((item) => item.status === "active"),
     notice: rounds.some((item) => item.status === "active") ? "Next round is up." : "Planned rounds are done. Tap Next round to keep going.",
   });
@@ -859,7 +908,7 @@ function finishRound(store: Store, now: number): StepResult {
 function endSession(store: Store, now: number): StepResult {
   const session = requireSession(store);
   if (!session) return fail(store, "There's no live session.");
-  const ended: Session = appendLog({ ...session, endedAt: now, paused: false }, now, "Session ended.");
+  const ended: Session = appendLog({ ...session, endedAt: now }, now, "Session ended.");
   const past = [ended, ...store.past].slice(0, PAST_LIMIT);
   const checkedIn = presentIds(ended);
   return commit(
@@ -887,5 +936,48 @@ export function sortStandings(rows: Standing[], players: readonly Player[]): Sta
 
 export function rosterPlayers(store: Store): Player[] {
   return [...store.players].sort(byName);
+}
+
+export function sessionRecap(session: Session, players: readonly Player[]): string {
+  const when = new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(session.createdAt));
+  const rows = sortStandings(standings(session), players);
+  const lines = [session.title, when, ""];
+  if (rows.every((row) => row.games === 0)) {
+    lines.push("No finished games.");
+    return lines.join("\n");
+  }
+  lines.push("Player — record, games played, point diff");
+  rows.forEach((row, index) => {
+    const diff = row.diff > 0 ? `+${row.diff}` : String(row.diff);
+    const record = row.games === 0 ? "no games" : `${row.wins}-${row.losses}`;
+    lines.push(`${index + 1}. ${playerName(players, row.playerId)} — ${record}, ${row.games} played, ${diff}`);
+  });
+  return lines.join("\n");
+}
+
+function importBackup(
+  store: Store,
+  action: Extract<Action, { type: "import-backup" }>,
+): StepResult {
+  const settings = sanitizeSettings(action.settings);
+  return commit(
+    store,
+    {
+      ...store,
+      players: action.players.map((player) => ({ ...player, skill: clampRating(player.skill) })),
+      settings,
+      past: action.past.slice(0, PAST_LIMIT),
+      active: action.active,
+      checkedIn: action.checkedIn.filter((id) => action.players.some((player) => player.id === id)),
+      skillLog: action.skillLog.slice(-2000),
+      view: action.active ? { name: "play" } : { name: "home" },
+    },
+    { includePast: true, notice: "Backup restored on this phone." },
+  );
 }
 

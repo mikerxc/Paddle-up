@@ -3,7 +3,7 @@ import { reduce } from "./engine/session.ts";
 import { createInitialStore } from "./engine/session.ts";
 import { defaultSettings } from "./model.ts";
 import type { Player } from "./model.ts";
-import { loadStore, saveStore, type StorageLike } from "./storage.ts";
+import { buildBackup, loadStore, parseBackup, saveStore, type StorageLike } from "./storage.ts";
 
 class MemoryStorage implements StorageLike {
   private map = new Map<string, string>();
@@ -56,5 +56,64 @@ describe("storage", () => {
     expect(loadStore(memory).players).toEqual([]);
     memory.setItem("paddle-up-v1", JSON.stringify({ version: 2 }));
     expect(loadStore(memory).settings.courts).toBe(2);
+  });
+
+  it("loads a v1 save that has no host flag and a legacy paused session", () => {
+    const memory = new MemoryStorage();
+    memory.setItem(
+      "paddle-up-v1",
+      JSON.stringify({
+        version: 1,
+        players: [{ id: "a", name: "Ann", gender: "female", skill: 3.2, createdAt: 1 }],
+        settings: { courts: 2, pointsToWin: 11, winBy: 2, initialRounds: 4, defaultSkill: 2, soundOn: true, vibrateOn: true },
+        checkedIn: ["a"],
+        active: {
+          id: "s",
+          title: "Open play",
+          createdAt: 1,
+          endedAt: null,
+          salt: 4,
+          paused: true,
+          attendance: [],
+          rounds: [],
+          rules: { courts: 1, pointsToWin: 11, winBy: 2 },
+          log: [],
+        },
+        past: [],
+        view: { name: "play" },
+      }),
+    );
+    const loaded = loadStore(memory);
+    expect(loaded.settings.hostSkills).toBe(false);
+    expect(loaded.players[0]?.skill).toBe(3.2);
+    expect(loaded.active?.id).toBe("s");
+    expect(loaded.active?.paused).toBe(true);
+    expect(loaded.skillLog).toEqual([]);
+    expect(reduce(loaded, { type: "undo" }, 2).error).toMatch(/Nothing to undo/);
+  });
+
+  it("rejects a backup that is not this app's file and accepts a valid one", () => {
+    expect(parseBackup({ version: 1 }).ok).toBe(false);
+    const store = {
+      ...createInitialStore(),
+      players: players(2),
+      skillLog: [{ at: 1, playerId: "p0", before: 3, after: 3.1, source: "game" as const }],
+    };
+    const backup = buildBackup(store, 90);
+    const parsed = parseBackup(JSON.parse(JSON.stringify(backup)));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const restored = reduce(createInitialStore(), {
+      type: "import-backup",
+      players: parsed.backup.players,
+      settings: parsed.backup.settings,
+      past: parsed.backup.past,
+      active: parsed.backup.active,
+      checkedIn: parsed.backup.checkedIn,
+      skillLog: parsed.backup.skillLog,
+    }, 91);
+    expect(restored.store.players.map((player) => player.name)).toEqual(["Player 0", "Player 1"]);
+    expect(restored.store.skillLog).toEqual(store.skillLog);
+    expect(restored.store.view.name).toBe("home");
   });
 });

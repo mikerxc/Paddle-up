@@ -19,6 +19,10 @@ import type { Gender } from "../model.ts";
  * exists. Mixed-vs-mixed and same-gender-vs-same-gender are both preferred.
  * Team skill totals stay close, but a small gap is allowed when it rotates
  * partners and opponents.
+ *
+ * On a court of four, the two lowest-rated players are not paired together
+ * against the two highest when the skills differ. The search keeps a
+ * strong+developing team on each side of the net instead.
  */
 
 export interface EnginePlayer {
@@ -59,6 +63,8 @@ export type GenderPattern = "mixed_mixed" | "same_same" | "mixed_same" | "women_
 /** Weights are compared directly. A women-vs-men match loses to any legal lineup. */
 export const WEIGHT = {
   womenVsMen: 100_000,
+  /** Two lowest together versus two highest. Loses to any split that mixes them. */
+  stackedSkills: 90_000,
   mixedSame: 800,
   /** Cost of a 0.1 gap between the two team skill totals. A full point is 200. */
   skillTenth: 20,
@@ -66,6 +72,9 @@ export const WEIGHT = {
   opponentEach: 140,
   courtSkew: 4,
 } as const;
+
+/** How far above the best soft cost a reshuffle may reach to find another fair lineup. */
+const VARIETY_BAND = 300;
 
 export function newSched(): SchedState {
   return {
@@ -233,6 +242,11 @@ function orderTeam(a: EnginePlayer, b: EnginePlayer): [string, string] {
   return a.id < b.id ? [a.id, b.id] : [b.id, a.id];
 }
 
+function isStackedSplit(split: Split): boolean {
+  const players = [split.teamA[0], split.teamA[1], split.teamB[0], split.teamB[1]];
+  return isLowHighStack(players, [split.teamA[0].id, split.teamA[1].id], [split.teamB[0].id, split.teamB[1].id]);
+}
+
 function splitCost(
   split: Split,
   ledger: Ledger,
@@ -247,6 +261,7 @@ function splitCost(
   let cost = 0;
   if (pattern === "women_vs_men") cost += WEIGHT.womenVsMen;
   else if (pattern === "mixed_same") cost += WEIGHT.mixedSame;
+  if (isStackedSplit(split)) cost += WEIGHT.stackedSkills;
   const sumA = skillTenths(split.teamA[0].skill) + skillTenths(split.teamA[1].skill);
   const sumB = skillTenths(split.teamB[0].skill) + skillTenths(split.teamB[1].skill);
   cost += Math.abs(sumA - sumB) * WEIGHT.skillTenth;
@@ -269,7 +284,7 @@ function toMatch(split: Split, court: number): PlannedMatch {
   };
 }
 
-function planKey(matches: PlannedMatch[]): string {
+function planKey(matches: readonly PlannedMatch[]): string {
   return matches
     .map((match) => {
       const side = (team: [string, string]) => [...team].sort().join("+");
@@ -285,26 +300,80 @@ function numberCourts(matches: PlannedMatch[]): PlannedMatch[] {
     .map((match, index) => ({ ...match, court: index + 1 }));
 }
 
-function bestAssignment(playing: EnginePlayer[], ledger: Ledger): PlannedMatch[] {
+interface ScoredPlan {
+  cost: number;
+  key: string;
+  matches: PlannedMatch[];
+}
+
+function copyMatches(matches: PlannedMatch[]): PlannedMatch[] {
+  return matches.map((match) => ({
+    ...match,
+    teamA: [...match.teamA] as [string, string],
+    teamB: [...match.teamB] as [string, string],
+  }));
+}
+
+function selectPlan(best: PlannedMatch[], band: ScoredPlan[], bestCost: number, variety: number, avoidKey: string): PlannedMatch[] {
+  if (!variety && !avoidKey) return best;
+  const viable = new Map<string, ScoredPlan>();
+  for (const item of band) {
+    if (item.cost > bestCost + VARIETY_BAND) continue;
+    const prev = viable.get(item.key);
+    if (!prev || item.cost < prev.cost) viable.set(item.key, item);
+  }
+  if (best.length > 0) {
+    const key = planKey(best);
+    const prev = viable.get(key);
+    if (!prev || bestCost < prev.cost) viable.set(key, { cost: bestCost, key, matches: best });
+  }
+  const pool = [...viable.values()];
+  if (pool.length === 0) return best;
+  const costs = [...new Set(pool.map((item) => item.cost))].sort((a, b) => a - b);
+  for (const cost of costs) {
+    if (cost > bestCost + VARIETY_BAND) break;
+    let tier = pool.filter((item) => item.cost === cost);
+    if (avoidKey) {
+      const different = tier.filter((item) => item.key !== avoidKey);
+      if (different.length === 0) continue;
+      tier = different;
+    }
+    tier.sort((a, b) => {
+      const hashA = fnv(`${a.key}#${variety}`);
+      const hashB = fnv(`${b.key}#${variety}`);
+      if (hashA !== hashB) return hashA < hashB ? -1 : 1;
+      return a.key < b.key ? -1 : 1;
+    });
+    return tier[0]?.matches ?? best;
+  }
+  return best;
+}
+
+function bestAssignment(playing: EnginePlayer[], ledger: Ledger, variety = 0, avoidKey = ""): PlannedMatch[] {
   if (playing.length === 0) return [];
-  if (playing.length > 12) return hillClimb(playing, ledger);
+  if (playing.length > 12) return hillClimb(playing, ledger, variety, avoidKey);
   const byId = new Map(playing.map((player) => [player.id, player]));
   const totalTenths = playing.reduce((sum, player) => sum + skillTenths(player.skill), 0);
   let bestCost = Number.POSITIVE_INFINITY;
   let bestKey = "";
   let best: PlannedMatch[] = [];
+  const band: ScoredPlan[] = [];
+  const wantsChoice = variety !== 0 || avoidKey !== "";
 
   for (const groups of partitions(playing)) {
     const options = groups.map((group) => splitsOf(group));
     const walk = (index: number, acc: PlannedMatch[], cost: number) => {
-      if (cost > bestCost) return;
+      if (!wantsChoice && cost > bestCost) return;
+      if (wantsChoice && cost > bestCost + VARIETY_BAND) return;
       if (index === options.length) {
         const key = planKey(acc);
+        const matches = copyMatches(acc);
         if (cost < bestCost || (cost === bestCost && key < bestKey)) {
           bestCost = cost;
           bestKey = key;
-          best = acc.map((match) => ({ ...match, teamA: [...match.teamA], teamB: [...match.teamB] }));
+          best = matches;
         }
+        if (wantsChoice) band.push({ cost, key, matches });
         return;
       }
       const splits = options[index] ?? [];
@@ -315,7 +384,7 @@ function bestAssignment(playing: EnginePlayer[], ledger: Ledger): PlannedMatch[]
     };
     walk(0, [], 0);
   }
-  return numberCourts(best);
+  return numberCourts(selectPlan(best, band, bestCost, variety, avoidKey));
 }
 
 function bySkillThenId(a: EnginePlayer, b: EnginePlayer): number {
@@ -353,15 +422,17 @@ function bestSplit(
   ledger: Ledger,
   totalTenths: number,
   playerCount: number,
+  variety = 0,
 ): PlannedMatch {
   const byId = new Map(group.map((player) => [player.id, player]));
   let best: PlannedMatch | null = null;
   let bestCost = Number.POSITIVE_INFINITY;
   let bestKey = "";
   for (const split of splitsOf(group)) {
-    const cost = splitCost(split, ledger, byId, totalTenths, playerCount);
     const match = toMatch(split, 1);
     const key = planKey([match]);
+    const jitter = variety ? fnv(`${key}#${variety}`) % 11 : 0;
+    const cost = splitCost(split, ledger, byId, totalTenths, playerCount) + jitter;
     if (cost < bestCost || (cost === bestCost && key < bestKey)) {
       bestCost = cost;
       bestKey = key;
@@ -391,11 +462,23 @@ function assignmentCost(matches: PlannedMatch[], playing: EnginePlayer[], ledger
   return cost;
 }
 
-function hillClimb(playing: EnginePlayer[], ledger: Ledger): PlannedMatch[] {
+function hillClimb(playing: EnginePlayer[], ledger: Ledger, variety = 0, avoidKey = ""): PlannedMatch[] {
+  const climb = (seed: number) => climbOnce(playing, ledger, seed);
+  let matches = climb(variety);
+  if (!variety && !avoidKey) return matches;
+  for (let attempt = 0; attempt < 5 && assignmentKey(matches) === avoidKey; attempt += 1) {
+    const next = climb(variety + attempt + 1);
+    if (assignmentKey(next) !== avoidKey) return next;
+    matches = next;
+  }
+  return matches;
+}
+
+function climbOnce(playing: EnginePlayer[], ledger: Ledger, variety: number): PlannedMatch[] {
   const courtCount = playing.length / 4;
   const groups = dealCourts(playing, courtCount);
   const totalTenths = playing.reduce((sum, player) => sum + skillTenths(player.skill), 0);
-  let matches = numberCourts(groups.map((group) => bestSplit(group, ledger, totalTenths, playing.length)));
+  let matches = numberCourts(groups.map((group) => bestSplit(group, ledger, totalTenths, playing.length, variety)));
   let bestCost = assignmentCost(matches, playing, ledger);
   let bestKey = planKey(matches);
 
@@ -420,7 +503,7 @@ function hillClimb(playing: EnginePlayer[], ledger: Ledger): PlannedMatch[] {
               if (index === right) return nextB;
               return group;
             });
-            const trial = numberCourts(trialGroups.map((group) => bestSplit(group, ledger, totalTenths, playing.length)));
+            const trial = numberCourts(trialGroups.map((group) => bestSplit(group, ledger, totalTenths, playing.length, variety)));
             const cost = assignmentCost(trial, playing, ledger);
             const key = planKey(trial);
             if (cost < bestCost || (cost === bestCost && key < bestKey)) {
@@ -447,13 +530,14 @@ export function planRound(
   courts: number,
   roundNumber: number,
   salt = 1,
+  variety?: PlanVariety,
 ): RoundPlan {
   const spots = courtsFor(players.length, courts) * 4;
   const { playing, sittingOut } = choosePlaying(players, sched, spots, roundNumber, salt);
   return {
     roundNumber,
     courtsUsed: playing.length / 4,
-    matches: bestAssignment(playing, ledger),
+    matches: bestAssignment(playing, ledger, variety?.variety ?? 0, variety?.avoidKey ?? ""),
     sittingOut,
   };
 }
@@ -507,4 +591,37 @@ export function teamSkillGap(
 ): number {
   const sum = (team: [string, string]) => skillTenths(skillOf(team[0])) + skillTenths(skillOf(team[1]));
   return Math.abs(sum(teamA) - sum(teamB)) / 10;
+}
+
+/** True when one team is the two lowest-rated players and the other is the two highest. */
+export function isLowHighStack(
+  players: readonly { id: string; skill: number }[],
+  teamA: readonly string[],
+  teamB: readonly string[],
+): boolean {
+  const ids = [...teamA, ...teamB];
+  if (ids.length !== 4 || new Set(ids).size !== 4) return false;
+  const skillOf = new Map(players.map((player) => [player.id, player.skill]));
+  const ranked = [...ids].sort((a, b) => {
+    const diff = (skillOf.get(a) ?? 0) - (skillOf.get(b) ?? 0);
+    if (diff !== 0) return diff;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  const low = skillOf.get(ranked[0] ?? "");
+  const high = skillOf.get(ranked[3] ?? "");
+  if (low === undefined || high === undefined || low === high) return false;
+  const lowest = new Set(ranked.slice(0, 2));
+  const isLowPair = (team: readonly string[]) => team.every((id) => lowest.has(id));
+  return isLowPair(teamA) || isLowPair(teamB);
+}
+
+export function assignmentKey(matches: readonly PlannedMatch[]): string {
+  return planKey(matches);
+}
+
+export interface PlanVariety {
+  /** Non-zero asks for a different fair lineup when one exists. */
+  variety?: number;
+  /** Lineup to skip when another fair one is available. */
+  avoidKey?: string;
 }

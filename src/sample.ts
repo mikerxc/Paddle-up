@@ -1,6 +1,6 @@
 import type { Player } from "./model.ts";
 
-/** A full social-group roster so a new phone can try a night without typing 12 names. */
+/** A full social group so a new phone can try a night without typing 12 names. */
 export const samplePlayers: Player[] = [
   { id: "sample-maya", name: "Maya Chen", gender: "female", skill: 3.8, createdAt: 1 },
   { id: "sample-andre", name: "Andre Walsh", gender: "male", skill: 4.2, createdAt: 2 },

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   applyRound,
+  assignmentKey,
   courtsFor,
   emptyLedger,
+  isLowHighStack,
   matchPattern,
   newSched,
   planRound,
@@ -232,6 +234,74 @@ describe("partner and opponent variety", () => {
     expect(first.matches.map((match) => [match.teamA, match.teamB])).toEqual(
       second.matches.map((match) => [match.teamA, match.teamB]),
     );
+  });
+});
+
+describe("no low-high stack", () => {
+  function expectSplit(players: EnginePlayer[], salt = 1, ledger = emptyLedger()) {
+    const plan = planRound(players, fresh(players), ledger, 1, 1, salt);
+    const match = plan.matches[0];
+    expect(match).toBeDefined();
+    if (!match) return;
+    expect(isLowHighStack(players, match.teamA, match.teamB)).toBe(false);
+  }
+
+  it("puts a strong player with a developing player on each side", () => {
+    const players = [
+      player("a", "male", 2.5),
+      player("b", "male", 3),
+      player("c", "male", 5),
+      player("d", "male", 5.5),
+    ];
+    expectSplit(players);
+    const plan = planRound(players, fresh(players), emptyLedger(), 1, 1, 1);
+    const match = plan.matches[0];
+    expect(match).toBeDefined();
+    if (!match) return;
+    const sides = [match.teamA, match.teamB].map((team) => [...team].sort().join("+")).sort();
+    expect(sides).toEqual(["a+d", "b+c"]);
+  });
+
+  it("still refuses the stack when repeat partners would prefer it", () => {
+    const players = [
+      player("low1", "male", 2.5),
+      player("low2", "male", 3),
+      player("high1", "male", 5),
+      player("high2", "male", 5.5),
+    ];
+    const ledger = emptyLedger();
+    ledger.partners["high2|low1"] = 8;
+    ledger.partners["high1|low2"] = 8;
+    ledger.partners["high1|low1"] = 8;
+    ledger.partners["high2|low2"] = 8;
+    expectSplit(players, 4, ledger);
+  });
+
+  it("keeps every court split when skills differ", () => {
+    const players = many(12);
+    let ledger = emptyLedger();
+    let sched = fresh(players);
+    for (let round = 1; round <= 4; round += 1) {
+      const plan = planRound(players, sched, ledger, 3, round, 5);
+      for (const match of plan.matches) {
+        expect(isLowHighStack(players, match.teamA, match.teamB)).toBe(false);
+      }
+      const applied = applyRound(sched, ledger, plan);
+      sched = applied.sched;
+      ledger = applied.ledger;
+    }
+  });
+
+  it("can choose a different fair lineup when asked to reshuffle", () => {
+    const players = many(8).map((item) => ({ ...item, skill: 4 }));
+    const first = planRound(players, fresh(players), emptyLedger(), 2, 1, 3);
+    const again = planRound(players, fresh(players), emptyLedger(), 2, 1, 3, {
+      variety: 19,
+      avoidKey: assignmentKey(first.matches),
+    });
+    expect(assignmentKey(again.matches)).not.toBe(assignmentKey(first.matches));
+    expect(again.sittingOut).toEqual(first.sittingOut);
+    expect(patterns(again, players)).not.toContain("women_vs_men");
   });
 });
 

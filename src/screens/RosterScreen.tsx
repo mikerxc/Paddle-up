@@ -11,14 +11,14 @@ export function RosterScreen() {
   const { store, dispatch } = useApp();
   const players = rosterPlayers(store);
   return (
-    <Screen title="Roster" onBack={() => dispatch({ type: "nav", view: { name: "home" } })}>
+    <Screen title="Players" onBack={() => dispatch({ type: "nav", view: { name: "home" } })}>
       <Button size="lg" full data-testid="add-player" onClick={() => dispatch({ type: "nav", view: { name: "edit", playerId: null, arriveAfter: false } })}>
         Add a player
       </Button>
       {players.length === 0 ? (
         <div className="rounded-2xl border-2 border-ink bg-card p-3">
           <p className="text-lg font-black">Your group isn't in here yet.</p>
-          <p className="mt-1 text-base font-semibold">Add players once. After that, check-in is just tapping names.</p>
+          <p className="mt-1 text-base font-semibold">Add players once. After that, Setup Games is just tapping names.</p>
           <Button className="mt-3" full variant="yellow" data-testid="load-sample" onClick={() => dispatch({ type: "load-sample", players: samplePlayers })}>
             Load sample group
           </Button>
@@ -34,7 +34,8 @@ export function RosterScreen() {
               >
                 <span className="text-lg font-black">{player.name}</span>
                 <span className="text-base font-bold">
-                  {genderMark(player.gender)} · {player.skill.toFixed(1)}
+                  {genderMark(player.gender)}
+                  {store.settings.hostSkills ? ` · ${player.skill.toFixed(1)}` : ""}
                 </span>
               </button>
             </li>
@@ -91,8 +92,13 @@ export function EditPlayerScreen() {
             Male
           </Button>
         </div>
-        <p className="text-base font-black">Skill · DUPR style</p>
-        <SkillStepper value={skill} onChange={setSkill} />
+        {store.settings.hostSkills && (
+          <>
+            <p className="text-base font-black">Hidden skill</p>
+            <p className="text-base font-semibold text-muted">Only visible with host controls on. Finished games keep learning from this number.</p>
+            <SkillStepper value={skill} onChange={setSkill} />
+          </>
+        )}
         {localError && <p className="rounded-xl border-2 border-ink bg-bad px-3 py-3 font-bold">{localError}</p>}
         <Button type="submit" size="lg" full data-testid="save-player">
           Save player
@@ -106,7 +112,7 @@ export function EditPlayerScreen() {
           disabled={inSession}
           onClick={() => dispatch({ type: "delete-player", playerId: existing.id })}
         >
-          {inSession ? "In the live session" : "Remove from roster"}
+          {inSession ? "In the live session" : "Remove from Players"}
         </Button>
       )}
     </Screen>

@@ -1,9 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useApp } from "../app-context.tsx";
 import { Screen } from "../components/Bits.tsx";
 import { Button } from "../components/ui/button.tsx";
-import { sortStandings, standings } from "../engine/session.ts";
-import { genderMark, playerName, type Session } from "../model.ts";
+import { copyText } from "../lib/clipboard.ts";
+import { sessionRecap, sortStandings, standings } from "../engine/session.ts";
+import { playerName, type Session } from "../model.ts";
 
 function findSession(storeSession: Session | null, past: Session[], sessionId: string | null): Session | null {
   if (sessionId === null) return storeSession;
@@ -12,6 +13,7 @@ function findSession(storeSession: Session | null, past: Session[], sessionId: s
 
 export function StatsScreen() {
   const { store, dispatch } = useApp();
+  const [copyLabel, setCopyLabel] = useState("Copy recap");
   const sessionId = store.view.name === "stats" ? store.view.sessionId : null;
   const session = findSession(store.active, store.past, sessionId);
   const readOnly = !store.active || session?.id !== store.active.id;
@@ -30,9 +32,23 @@ export function StatsScreen() {
       onBack={() => dispatch({ type: "nav", view: readOnly ? { name: "past" } : { name: "play" } })}
     >
       <p className="text-lg font-semibold">
-        {finished} finished {finished === 1 ? "round" : "rounds"}. Wins, losses, and point margin.
+        {finished} finished {finished === 1 ? "round" : "rounds"}. Wins, losses, games played, and point margin.
         {readOnly ? " This night is saved on this phone." : " Only finished rounds count."}
       </p>
+      <Button
+        size="lg"
+        full
+        variant="yellow"
+        data-testid="copy-recap"
+        onClick={() => {
+          void copyText(sessionRecap(session, store.players)).then((ok) => {
+            setCopyLabel(ok ? "Copied!" : "Couldn't copy");
+            window.setTimeout(() => setCopyLabel("Copy recap"), 2000);
+          });
+        }}
+      >
+        {copyLabel}
+      </Button>
       {rows.every((row) => row.games === 0) ? (
         <p className="rounded-2xl border-2 border-ink bg-card p-3 font-bold">No finished games yet. Scores land here when you finish the round.</p>
       ) : (
@@ -49,8 +65,7 @@ export function StatsScreen() {
                   <p className={`text-3xl font-black tabular-nums ${row.diff > 0 ? "text-court" : row.diff < 0 ? "text-clay" : ""}`}>{diff}</p>
                 </div>
                 <p className="text-lg font-semibold">
-                  {row.games === 0 ? "Hasn't finished a game" : `${row.wins} wins · ${row.losses} losses`}
-                  {player ? ` · ${genderMark(player.gender)} ${player.skill.toFixed(1)}` : ""}
+                  {row.games === 0 ? "Hasn't finished a game" : `${row.wins} wins · ${row.losses} losses · ${row.games} played`}
                 </p>
               </li>
             );
@@ -80,7 +95,7 @@ export function LogScreen() {
   if (!session) return null;
   return (
     <Screen title="Session log" onBack={() => dispatch({ type: "nav", view: { name: "play" } })}>
-      <p className="font-semibold">Oldest first. Rounds, scores, swaps, arrivals, and undos.</p>
+      <p className="font-semibold">Oldest first. Rounds, scores, swaps, players joining, and undos.</p>
       <LogList session={session} />
       <div ref={end} />
     </Screen>
