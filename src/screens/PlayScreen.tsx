@@ -320,19 +320,20 @@ function CourtSide({
     </div>
   );
   const scoreBlock = (
-    <div className="flex flex-col items-center justify-center gap-1.5 py-0.5">
+    <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1 py-0.5">
+      <div />
       <button
         type="button"
-        className="min-h-12 min-w-[5.25rem] rounded-2xl border-2 border-white/90 bg-[#083820] px-3 text-4xl font-black tabular-nums text-white"
+        className="min-h-16 min-w-[5.5rem] justify-self-center rounded-2xl border-2 border-white/90 bg-[#083820] px-3 text-5xl font-black tabular-nums text-white"
         aria-label={`Set score ${score}`}
         onClick={() => onOpenPad(side)}
       >
         {score}
       </button>
-      <div className="flex flex-col gap-1.5">
+      <div className="flex flex-col items-end gap-1.5 justify-self-end">
         <Button
           variant="yellow"
-          className="h-12 w-[4.5rem] text-3xl"
+          className="h-14 w-16 shrink-0 text-3xl"
           data-testid={`score-plus-${matchId}-${side}`}
           aria-label="Plus one"
           onClick={() => onNudge(side, 1)}
@@ -341,7 +342,7 @@ function CourtSide({
         </Button>
         <Button
           variant="secondary"
-          className="h-12 w-[4.5rem] text-3xl"
+          className="h-14 w-16 shrink-0 text-3xl"
           data-testid={`score-minus-${matchId}-${side}`}
           aria-label="Minus one"
           onClick={() => onNudge(side, -1)}

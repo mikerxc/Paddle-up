@@ -75,36 +75,46 @@ button {
   pointer-events: none;
 }
 
-.court-half-far::before {
-  top: 0;
-  bottom: 16px;
-}
-
+.court-half-far::before,
 .court-half-near::before {
-  top: 16px;
+  top: 0;
   bottom: 0;
 }
 
-.court-kitchen {
-  position: relative;
-  z-index: 1;
-  height: 0;
-  margin: 0 2px;
-  border-top: 3px solid rgba(255, 255, 255, 0.95);
+/* Open court beside the net so the 7 ft kitchen line is not covered by the score controls. */
+.court-half-far {
+  padding-bottom: 5.5rem;
+}
+
+.court-half-near {
+  padding-top: 5.5rem;
+}
+
+/* Kitchen is 7 ft deep on a 22 ft half (net to baseline), full width between the sidelines. */
+.court-half > .court-kitchen {
+  position: absolute;
+  z-index: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  margin: 0;
+  background: rgba(255, 255, 255, 0.95);
+  pointer-events: none;
+}
+
+.court-half-far > .court-kitchen {
+  bottom: calc(100% * 7 / 22);
+  transform: translateY(50%);
+}
+
+.court-half-near > .court-kitchen {
+  top: calc(100% * 7 / 22);
+  transform: translateY(-50%);
 }
 
 .court-net {
   position: relative;
   z-index: 2;
-  height: 16px;
-  background:
-    repeating-linear-gradient(
-      90deg,
-      rgba(255, 255, 255, 0.7) 0 2px,
-      rgba(20, 24, 20, 0.18) 2px 6px
-    ),
-    linear-gradient(#f7f7f7, #d5d5d5);
-  box-shadow:
-    0 -4px 0 #ffffff,
-    0 5px 0 #111111;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.95);
 }

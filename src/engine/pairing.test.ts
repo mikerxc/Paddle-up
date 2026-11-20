@@ -7,6 +7,7 @@ import {
   isLowHighStack,
   matchPattern,
   newSched,
+  pairKey,
   planRound,
   teamSkillGap,
   type EnginePlayer,
@@ -213,6 +214,114 @@ describe("sit-outs", () => {
       expect(sched[player.id]?.sitOuts).toBe(1);
       expect(sched[player.id]?.gamesPlayed).toBe(8);
     }
+  });
+});
+
+function teamPairs(plan: RoundPlan): string[] {
+  return plan.matches.flatMap((match) => [pairKey(match.teamA[0], match.teamA[1]), pairKey(match.teamB[0], match.teamB[1])]);
+}
+
+function assertNoImmediateRepeat(previous: RoundPlan, next: RoundPlan) {
+  const before = new Set(teamPairs(previous));
+  expect(teamPairs(next).filter((key) => before.has(key))).toEqual([]);
+}
+
+function assertSittersMixed(previous: RoundPlan, next: RoundPlan) {
+  const stayed = new Set(playingIds(previous));
+  const sat = new Set(previous.sittingOut);
+  const now = new Set(playingIds(next));
+  const stayers = new Set([...now].filter((id) => stayed.has(id)));
+  const returners = new Set([...now].filter((id) => sat.has(id)));
+  if (stayers.size === 0 || returners.size === 0) return;
+  let mixed = 0;
+  for (const match of next.matches) {
+    for (const team of [match.teamA, match.teamB]) {
+      const [a, b] = team;
+      if ((returners.has(a) && stayers.has(b)) || (returners.has(b) && stayers.has(a))) mixed += 1;
+    }
+  }
+  expect(mixed).toBe(Math.min(stayers.size, returners.size));
+}
+
+describe("sit-out mix avoids repeat partners", () => {
+  function assertNight(count: number, courts: number, rounds: number) {
+    const players = many(count);
+    const { plans, sched } = simulate(players, courts, rounds, 9);
+    for (const plan of plans) {
+      assertCovered(plan, players);
+      for (const match of plan.matches) expect(isLowHighStack(players, match.teamA, match.teamB)).toBe(false);
+    }
+    for (let index = 1; index < plans.length; index += 1) {
+      const previous = plans[index - 1];
+      const next = plans[index];
+      if (!previous || !next) continue;
+      assertNoImmediateRepeat(previous, next);
+      assertSittersMixed(previous, next);
+    }
+    const games = players.map((item) => sched[item.id]?.gamesPlayed ?? -1);
+    expect(Math.max(...games) - Math.min(...games)).toBeLessThanOrEqual(1);
+  }
+
+  it("mixes the two players coming off the bench with the two who stayed in a group of 6", () => {
+    assertNight(6, 1, 6);
+    const players = many(6);
+    const { plans } = simulate(players, 1, 2, 4);
+    const first = plans[0];
+    const second = plans[1];
+    expect(first?.sittingOut).toHaveLength(2);
+    expect(second?.sittingOut).toHaveLength(2);
+    if (!first || !second) return;
+    const stayed = playingIds(first).filter((id) => playingIds(second).includes(id));
+    const returned = first.sittingOut.filter((id) => playingIds(second).includes(id));
+    expect(stayed).toHaveLength(2);
+    expect(returned).toHaveLength(2);
+    assertSittersMixed(first, second);
+    assertNoImmediateRepeat(first, second);
+  });
+
+  it("keeps the same rule for 5 players on one court and 10 players on two courts", () => {
+    const men = many(5, "men");
+    const { plans, sched } = simulate(men, 1, 5, 9);
+    for (let index = 1; index < plans.length; index += 1) {
+      const previous = plans[index - 1];
+      const next = plans[index];
+      if (!previous || !next) continue;
+      assertNoImmediateRepeat(previous, next);
+      assertSittersMixed(previous, next);
+      for (const match of next.matches) expect(isLowHighStack(men, match.teamA, match.teamB)).toBe(false);
+    }
+    const games = men.map((item) => sched[item.id]?.gamesPlayed ?? -1);
+    expect(Math.max(...games) - Math.min(...games)).toBeLessThanOrEqual(1);
+    assertNight(10, 2, 5);
+  });
+
+  it("breaks last round's partners when another lineup is not a stack or women versus men", () => {
+    const players = [
+      player("a", "male", 2.5),
+      player("b", "male", 3.5),
+      player("c", "male", 4.5),
+      player("d", "male", 5.5),
+    ];
+    const ledger = emptyLedger();
+    ledger.lastPartners["a|d"] = 1;
+    ledger.lastPartners["b|c"] = 1;
+    ledger.partners["a|d"] = 1;
+    ledger.partners["b|c"] = 1;
+    const sched = fresh(players);
+    for (const item of players) {
+      const state = sched[item.id];
+      if (!state) continue;
+      state.lastPlayedRound = 1;
+      state.scheduleGames = 1;
+      state.gamesPlayed = 1;
+    }
+    const plan = planRound(players, sched, ledger, 1, 2, 1);
+    const match = plan.matches[0];
+    expect(match).toBeDefined();
+    if (!match) return;
+    expect(isLowHighStack(players, match.teamA, match.teamB)).toBe(false);
+    const sides = [match.teamA, match.teamB].map((team) => pairKey(team[0], team[1])).sort();
+    expect(sides).toEqual(["a|c", "b|d"]);
   });
 });
 
