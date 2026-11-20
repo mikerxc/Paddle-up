@@ -4,8 +4,11 @@ import { Screen, Stepper } from "../components/Bits.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { Sheet } from "../components/ui/dialog.tsx";
 import { playRoundCue } from "../lib/sound.ts";
+import { Input } from "../components/ui/input.tsx";
 import { MAX_COURTS, SKILL_MAX, SKILL_MIN } from "../model.ts";
 import { buildBackup, parseBackup, type BackupFile } from "../storage.ts";
+
+const HOST_PIN = "000";
 
 export function SettingsScreen() {
   const { store, dispatch } = useApp();
@@ -13,6 +16,9 @@ export function SettingsScreen() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [pending, setPending] = useState<BackupFile | null>(null);
+  const [hostPin, setHostPin] = useState("");
+  const [hostUnlocked, setHostUnlocked] = useState(false);
+  const [pinWrong, setPinWrong] = useState(false);
   const set = (patch: Partial<typeof settings>) => dispatch({ type: "set-settings", patch });
 
   const download = () => {
@@ -32,9 +38,9 @@ export function SettingsScreen() {
   return (
     <Screen title="Settings" onBack={() => dispatch({ type: "nav", view: { name: "home" } })}>
       <p className="text-lg font-semibold">
-        These are the defaults for a new night. Court count, points, and win-by also change a live session.
+        These are the defaults for a new session. Court count, points, and win-by also change a live session.
       </p>
-      <Rule label="Courts" hint="Most nights are 1 or 2. One court plays 4 people and sits the rest.">
+      <Rule label="Courts" hint="Most groups use 1 or 2. One court plays 4 people and sits the rest.">
         <Stepper label="courts" value={settings.courts} min={1} max={MAX_COURTS} onChange={(courts) => set({ courts })} testId="settings-courts" />
       </Rule>
       <Rule label="Points to win" hint="Rally scoring. 11 is the usual game.">
@@ -43,7 +49,7 @@ export function SettingsScreen() {
       <Rule label="Win by" hint="The winner stops at the target, or at the other score plus this margin. 11–9 and 13–11 count. 15–5 and 12–5 do not. There is no cap.">
         <Stepper label="win by" value={settings.winBy} min={1} max={5} onChange={(winBy) => set({ winBy })} />
       </Rule>
-      <Rule label="Rounds to plan" hint="How many rounds to lay out when you hit start. Next round keeps the night going after that, until you end it.">
+      <Rule label="Rounds to plan" hint="How many rounds to lay out when you hit start. Next round keeps the session going after that, until you end it.">
         <Stepper label="rounds" value={settings.initialRounds} min={1} max={12} onChange={(initialRounds) => set({ initialRounds })} />
       </Rule>
       <Button size="lg" full variant={settings.soundOn ? "default" : "secondary"} onClick={() => set({ soundOn: !settings.soundOn })}>
@@ -57,34 +63,74 @@ export function SettingsScreen() {
       </Button>
       <section className="rounded-2xl border-2 border-dashed border-ink bg-card p-3">
         <h2 className="text-lg font-black">Host</h2>
-        <p className="mb-2 text-base font-semibold text-muted">
-          Off by default. Turn this on only if you want to view or set a hidden skill before round one.
-        </p>
-        <Button
-          size="lg"
-          full
-          variant={settings.hostSkills ? "default" : "secondary"}
-          data-testid="host-skills"
-          onClick={() => set({ hostSkills: !settings.hostSkills })}
-        >
-          Host skill controls {settings.hostSkills ? "on" : "off"}
-        </Button>
-        {settings.hostSkills && (
-          <div className="mt-3">
-            <h3 className="text-lg font-black">Starting skill</h3>
+        {hostUnlocked ? (
+          <>
             <p className="mb-2 text-base font-semibold text-muted">
-              New players begin here, from 2.0 to 5.5. Finished games nudge it quietly. Nobody else sees the number.
+              Off by default. Turn this on only if you want to view or set a hidden skill before round one. Closing Settings locks this again.
             </p>
-            <Stepper
-              label="starting skill"
-              value={settings.defaultSkill}
-              min={SKILL_MIN}
-              max={SKILL_MAX}
-              step={0.1}
-              format={(value) => value.toFixed(1)}
-              onChange={(defaultSkill) => set({ defaultSkill })}
+            <Button
+              size="lg"
+              full
+              variant={settings.hostSkills ? "default" : "secondary"}
+              data-testid="host-skills"
+              onClick={() => set({ hostSkills: !settings.hostSkills })}
+            >
+              Host skill controls {settings.hostSkills ? "on" : "off"}
+            </Button>
+            {settings.hostSkills && (
+              <div className="mt-3">
+                <h3 className="text-lg font-black">Starting skill</h3>
+                <p className="mb-2 text-base font-semibold text-muted">
+                  New players begin here, from 2.0 to 5.5. Finished games nudge it quietly. Nobody else sees the number.
+                </p>
+                <Stepper
+                  label="starting skill"
+                  value={settings.defaultSkill}
+                  min={SKILL_MIN}
+                  max={SKILL_MAX}
+                  step={0.1}
+                  format={(value) => value.toFixed(1)}
+                  onChange={(defaultSkill) => set({ defaultSkill })}
+                />
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <p className="mb-2 text-base font-semibold text-muted">
+              Enter the 3-digit host PIN to view or change hidden skills. A wrong PIN stays locked.
+            </p>
+            <Input
+              inputMode="numeric"
+              autoComplete="off"
+              maxLength={3}
+              value={hostPin}
+              aria-label="Host PIN"
+              placeholder="•••"
+              data-testid="host-pin"
+              className="text-center text-3xl tracking-[0.5em]"
+              onChange={(event) => {
+                const digits = event.target.value.replace(/\D/g, "").slice(0, 3);
+                setPinWrong(false);
+                if (digits.length < 3) {
+                  setHostPin(digits);
+                  return;
+                }
+                if (digits === HOST_PIN) {
+                  setHostPin("");
+                  setHostUnlocked(true);
+                  return;
+                }
+                setHostPin("");
+                setPinWrong(true);
+              }}
             />
-          </div>
+            {pinWrong && (
+              <p className="mt-2 rounded-xl border-2 border-ink bg-bad px-3 py-3 font-bold" data-testid="host-pin-error">
+                Wrong PIN. Host skills stay locked.
+              </p>
+            )}
+          </>
         )}
       </section>
       <section className="rounded-2xl border-2 border-ink bg-card p-3">

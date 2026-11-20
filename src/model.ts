@@ -14,7 +14,7 @@ export interface Player {
 }
 
 export interface Settings {
-  /** Courts available tonight. The engine uses fewer when there aren't enough players. */
+  /** Courts available for the session. The engine uses fewer when there aren't enough players. */
   courts: number;
   pointsToWin: number;
   winBy: number;

@@ -14,7 +14,7 @@ export function CheckInScreen() {
     <Screen title="Setup Games" onBack={() => dispatch({ type: "nav", view: { name: "home" } })}>
       <div className="rounded-2xl border-2 border-ink bg-court px-3 py-3 text-white">
         <p className="text-xs font-black tracking-[0.16em] text-ball uppercase">Fair matchups</p>
-        <p className="mt-1 text-xl font-black leading-tight">Who's playing tonight?</p>
+        <p className="mt-1 text-xl font-black leading-tight">Who's playing?</p>
         <p className="mt-1 text-base font-semibold">Tap everyone who showed up. Teams stay balanced across the courts.</p>
       </div>
       <div className="grid grid-cols-2 gap-2">

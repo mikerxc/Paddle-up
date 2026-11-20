@@ -33,7 +33,7 @@ export function StatsScreen() {
     >
       <p className="text-lg font-semibold">
         {finished} finished {finished === 1 ? "round" : "rounds"}. Wins, losses, games played, and point margin.
-        {readOnly ? " This night is saved on this phone." : " Only finished rounds count."}
+        {readOnly ? " This session is saved on this phone." : " Only finished rounds count."}
       </p>
       <Button
         size="lg"
@@ -126,7 +126,7 @@ export function PastScreen() {
     <Screen title="Past sessions" onBack={() => dispatch({ type: "nav", view: { name: "home" } })}>
       {store.past.length === 0 ? (
         <p className="rounded-2xl border-2 border-ink bg-card p-3 text-lg font-semibold">
-          Finished nights show up here, with the score log still on this phone.
+          Finished sessions show up here, with the score log still on this phone.
         </p>
       ) : (
         <ul className="flex flex-col gap-2">

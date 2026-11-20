@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useApp } from "../app-context.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { Sheet } from "../components/ui/dialog.tsx";
-import { activeRound, presentIds } from "../engine/session.ts";
+import { activeRound, presentIds, roundUndoCount } from "../engine/session.ts";
 import { matchPattern } from "../engine/pairing.ts";
 import { finalScoreIssue, scoreStatus } from "../engine/scoring.ts";
 import { genderMark, MAX_COURTS, MAX_SCORE, playerName, type Match, type Player, type Round, type Session } from "../model.ts";
@@ -18,13 +18,19 @@ export function PlayScreen() {
   const round = activeRound(session);
   const here = presentIds(session).length;
   const upcoming = session.rounds.filter((item) => item.status === "pending");
+  const undoCount = roundUndoCount(store);
 
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="sticky top-0 z-20 border-b-2 border-ink bg-paper px-3 py-3">
         <div className="flex items-center gap-2">
-          <Button variant="yellow" data-testid="undo" onClick={() => dispatch({ type: "undo" })}>
-            Undo{store.undo.length > 0 ? ` ${store.undo.length}` : ""}
+          <Button
+            variant="yellow"
+            data-testid="undo"
+            aria-label={undoCount > 0 ? `Undo ${undoCount} this round` : "Undo"}
+            onClick={() => dispatch({ type: "undo" })}
+          >
+            Undo{undoCount > 0 ? ` ${undoCount}` : ""}
           </Button>
           <p className="min-w-0 flex-1 text-center text-lg font-black">
             {round ? `Round ${round.number}` : "Between rounds"}
@@ -103,7 +109,7 @@ export function PlayScreen() {
         ) : (
           <section className="rounded-2xl border-2 border-ink bg-card p-3">
             <h2 className="text-xl font-black">Planned rounds are done.</h2>
-            <p className="mt-1 font-semibold">Next round keeps the teams balanced and rotates who sits. Keep going until you end the night.</p>
+            <p className="mt-1 font-semibold">Next round keeps the teams balanced and rotates who sits. Keep going until you end the session.</p>
           </section>
         )}
         {upcoming.length > 0 && (

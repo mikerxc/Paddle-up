@@ -90,6 +90,25 @@ export function activeRound(session: Session): Round | null {
   return session.rounds.find((round) => round.status === "active") ?? null;
 }
 
+/**
+ * Edits made while the round now on court was already the open round.
+ * Check-in, the session start, and the previous round stay on the undo stack,
+ * but they do not add to this count. Finishing a round or opening the next
+ * one drops the count back to zero. The button can still undo that boundary.
+ */
+export function roundUndoCount(store: Store): number {
+  const roundNumber = store.active ? (activeRound(store.active)?.number ?? null) : null;
+  if (roundNumber === null) return 0;
+  let count = 0;
+  for (let index = store.undo.length - 1; index >= 0; index -= 1) {
+    const snap = store.undo[index];
+    const snapRound = snap?.active ? (activeRound(snap.active)?.number ?? null) : null;
+    if (snapRound !== roundNumber) break;
+    count += 1;
+  }
+  return count;
+}
+
 export function presentIds(session: Session): string[] {
   return session.attendance.filter((att) => att.leftAtRound === null).map((att) => att.playerId);
 }

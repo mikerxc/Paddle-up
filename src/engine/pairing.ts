@@ -22,12 +22,15 @@ import type { Gender } from "../model.ts";
  *
  * On a court of four, the two lowest-rated players are not paired together
  * against the two highest when the skills differ. The search keeps a
- * strong+developing team on each side of the net instead.
+ * strong+developing team on each side of the net instead. The lowest-rated
+ * players in the whole round are also kept off the same team when another
+ * fair lineup exists, including a court of equally low players.
  *
  * After any round, at any group size, players coming back from a sit-out are
  * mixed with players who stayed on court. Nobody partners with the same
  * person two rounds in a row when another lineup still avoids a women-vs-men
- * match and a low-vs-high stack.
+ * match and a low-vs-high stack. Older partner counts outweigh team-skill
+ * gap, but they stay under that mix and the protections above.
  */
 
 export interface EnginePlayer {
@@ -67,24 +70,30 @@ export interface RoundPlan {
 
 export type GenderPattern = "mixed_mixed" | "same_same" | "mixed_same" | "women_vs_men";
 
-/** Weights are compared directly. A women-vs-men match loses to any legal lineup. */
+/**
+ * Weights are compared directly. Each tier stays larger than a realistic
+ * total of the tiers under it. Who sits is chosen before this search.
+ */
 export const WEIGHT = {
-  womenVsMen: 100_000,
-  /** Two lowest together versus two highest. Loses to any split that mixes them. */
-  stackedSkills: 90_000,
+  womenVsMen: 1_000_000_000,
+  /** Two lowest on a court versus the two highest on that court. */
+  stackedSkills: 100_000_000,
+  /** Lowest-rated players in the whole round are partners. */
+  lowestPair: 10_000_000,
+  /**
+   * Same partnership as the immediately previous round.
+   * Below a low-high stack, above mixing and older repeat counts.
+   */
+  consecutivePartner: 1_000_000,
+  /** Two returners together, or two stayers together, when the other group is also playing. */
+  unmixedPair: 50_000,
+  /** One earlier game together. Outweighs skill gap, under the mix rule. */
+  partnerEach: 6_000,
   mixedSame: 800,
   /** Cost of a 0.1 gap between the two team skill totals. A full point is 200. */
   skillTenth: 20,
-  partnerEach: 280,
   opponentEach: 140,
   courtSkew: 4,
-  /**
-   * Same partnership as the immediately previous round.
-   * Above skill gap and older repeat counts, below a low-high stack.
-   */
-  consecutivePartner: 40_000,
-  /** Two returners together, or two stayers together, when the other group is also playing. */
-  unmixedPair: 8_000,
 } as const;
 
 /** How far above the best soft cost a reshuffle may reach to find another fair lineup. */
@@ -265,6 +274,21 @@ interface MixContext {
   lastPartners: Record<string, number>;
   stayers: ReadonlySet<string>;
   returners: ReadonlySet<string>;
+  lowestBan: ReadonlySet<string>;
+}
+
+/** Players at the bottom of the round who should not partner each other. */
+function lowestBanIds(players: readonly EnginePlayer[]): Set<string> {
+  if (players.length < 2) return new Set();
+  const sorted = [...players].sort(bySkillThenId);
+  const lowest = sorted[0];
+  const highest = sorted[sorted.length - 1];
+  if (!lowest || !highest || lowest.skill === highest.skill) return new Set();
+  const atMin = sorted.filter((player) => player.skill === lowest.skill);
+  if (atMin.length >= 2) return new Set(atMin.map((player) => player.id));
+  const second = sorted[1];
+  if (!second || second.skill === highest.skill) return new Set();
+  return new Set([lowest.id, second.id]);
 }
 
 function mixContext(
@@ -280,7 +304,7 @@ function mixContext(
     if (state.lastPlayedRound === roundNumber - 1) stayers.add(player.id);
     else if (state.lastSatRound === roundNumber - 1) returners.add(player.id);
   }
-  return { lastPartners: ledger.lastPartners ?? {}, stayers, returners };
+  return { lastPartners: ledger.lastPartners ?? {}, stayers, returners, lowestBan: lowestBanIds(playing) };
 }
 
 function sameCohort(mix: MixContext, a: string, b: string): boolean {
@@ -316,6 +340,9 @@ function splitCost(
     for (const right of teamB) cost += pairCount(ledger.opponents, left, right) * WEIGHT.opponentEach;
   }
   for (const team of [teamA, teamB]) {
+    if (mix.lowestBan.size >= 2 && mix.lowestBan.has(team[0]) && mix.lowestBan.has(team[1])) {
+      cost += WEIGHT.lowestPair;
+    }
     if (pairCount(mix.lastPartners, team[0], team[1]) > 0) cost += WEIGHT.consecutivePartner;
     if (sameCohort(mix, team[0], team[1])) cost += WEIGHT.unmixedPair;
   }

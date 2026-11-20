@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "../model.ts";
 import type { Player, Store } from "../model.ts";
-import { activeRound, createInitialStore, presentIds, reduce, recompute, roundLineupKey, sessionRecap, standings } from "./session.ts";
+import { activeRound, createInitialStore, presentIds, reduce, recompute, roundLineupKey, roundUndoCount, sessionRecap, standings } from "./session.ts";
 import { matchPattern } from "./pairing.ts";
 
 function makePlayers(count: number): Player[] {
@@ -74,6 +74,28 @@ describe("undo", () => {
     expect(backToCheckin.store.active).toBeNull();
     expect(backToCheckin.store.view.name).toBe("checkin");
     expect(reduce(backToCheckin.store, { type: "undo" }, 9).error).toMatch(/Nothing to undo/);
+  });
+
+  it("counts edits in the open round and resets that count when the next round starts", () => {
+    let step = reduce(ready(4, 1), { type: "toggle-checkin", playerId: "p0" }, 1);
+    step = reduce(step.store, { type: "toggle-checkin", playerId: "p0" }, 2);
+    step = reduce(step.store, { type: "start-session" }, 3);
+    expect(step.store.undo.length).toBeGreaterThan(2);
+    expect(roundUndoCount(step.store)).toBe(0);
+    const match = must(activeRound(must(step.store.active, "s"))?.matches[0], "m");
+    step = reduce(step.store, { type: "nudge-score", matchId: match.id, side: "A", delta: 1 }, 4);
+    step = reduce(step.store, { type: "nudge-score", matchId: match.id, side: "A", delta: 1 }, 5);
+    expect(roundUndoCount(step.store)).toBe(2);
+    step = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 11 }, 6);
+    step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 9 }, 7);
+    expect(roundUndoCount(step.store)).toBe(4);
+    step = reduce(step.store, { type: "finish-round" }, 8);
+    expect(activeRound(must(step.store.active, "next"))?.number).toBe(2);
+    expect(roundUndoCount(step.store)).toBe(0);
+    const undone = reduce(step.store, { type: "undo" }, 9);
+    expect(activeRound(must(undone.store.active, "back"))?.number).toBe(1);
+    expect(roundUndoCount(undone.store)).toBe(4);
+    expect(undone.store.active?.rounds[0]?.matches[0]?.scoreA).toBe(11);
   });
 
   it("brings back a session that was ended by mistake", () => {
