@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AppContext } from "./app-context.tsx";
-import { reduce, type Action } from "./engine/session.ts";
+import { actionReplans, runPlanned } from "./engine/planner-client.ts";
+import { reduce, type Action, type StepResult } from "./engine/session.ts";
 import { playRoundCue } from "./lib/sound.ts";
 import { loadStore, saveStore } from "./storage.ts";
 import { CheckInScreen } from "./screens/CheckInScreen.tsx";
@@ -15,7 +16,10 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saveFailed, setSaveFailed] = useState(false);
+  const [planning, setPlanning] = useState(false);
+  const [hostUnlocked, setHostUnlocked] = useState(false);
   const storeRef = useRef(store);
+  const planningRef = useRef(false);
 
   useEffect(() => {
     if (!notice) return;
@@ -23,8 +27,7 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  const dispatch = (action: Action) => {
-    const result = reduce(storeRef.current, action);
+  const applyResult = (result: StepResult) => {
     storeRef.current = result.store;
     setStore(result.store);
     setError(result.error ?? null);
@@ -33,11 +36,38 @@ export default function App() {
     setSaveFailed(!saveStore(result.store));
   };
 
+  const dispatch = (action: Action) => {
+    if (planningRef.current) return;
+    const current = storeRef.current;
+    if (!actionReplans(action, current)) {
+      applyResult(reduce(current, action));
+      return;
+    }
+    planningRef.current = true;
+    setPlanning(true);
+    const now = Date.now();
+    void runPlanned(current, action, now).then((result) => {
+      planningRef.current = false;
+      setPlanning(false);
+      applyResult(result);
+    });
+  };
+
   const view = store.view.name;
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [view]);
+
   return (
-    <AppContext.Provider value={{ store, dispatch, error, notice }}>
+    <AppContext.Provider value={{ store, dispatch, error, notice, planning, hostUnlocked, setHostUnlocked }}>
       <div className="min-h-dvh bg-bench text-ink">
         <div className="mx-auto min-h-dvh w-full max-w-[480px] bg-paper shadow-[0_0_0_2px_#1a140c]" data-screen={view}>
+          {planning && (
+            <p role="status" data-testid="planning" className="sticky top-0 z-40 bg-ink px-3 py-2 text-center text-sm font-black text-paper">
+              Planning the next rounds…
+            </p>
+          )}
           {(error || notice || saveFailed) && (
             <div className="pointer-events-none fixed inset-x-0 bottom-0 z-30 mx-auto flex w-full max-w-[480px] flex-col gap-2 px-3 pb-[max(12px,env(safe-area-inset-bottom))]">
               {saveFailed && (

@@ -4,40 +4,38 @@ import {
   assignmentKey,
   courtsFor,
   emptyLedger,
-  isLowHighStack,
-  matchPattern,
+  inwardFeasible,
+  lineupKey,
   newSched,
   pairKey,
   planRound,
+  teamRatingTotal,
   teamSkillGap,
+  WEIGHT,
   type EnginePlayer,
-  type GenderPattern,
   type Ledger,
   type RoundPlan,
   type SchedState,
 } from "./pairing.ts";
-import type { Gender } from "../model.ts";
 
-function player(id: string, gender: Gender, skill: number): EnginePlayer {
-  return { id, gender, skill };
+function player(id: string, skill: number): EnginePlayer {
+  return { id, skill };
 }
 
 function balancedEight(): EnginePlayer[] {
   const skills = [3, 3.5, 4, 4.5];
   const players: EnginePlayer[] = [];
   skills.forEach((skill, index) => {
-    players.push(player(`m${index}`, "male", skill));
-    players.push(player(`f${index}`, "female", skill));
+    players.push(player(`m${index}`, skill));
+    players.push(player(`f${index}`, skill));
   });
   return players;
 }
 
-function many(count: number, courtsGender: "mixed" | "men" | "women" = "mixed"): EnginePlayer[] {
+function many(count: number): EnginePlayer[] {
   return Array.from({ length: count }, (_, index) => {
-    const gender: Gender =
-      courtsGender === "men" ? "male" : courtsGender === "women" ? "female" : index % 2 === 0 ? "female" : "male";
     const skill = 2.5 + ((index * 3) % 31) / 10;
-    return player(`p${String(index).padStart(2, "0")}`, gender, Math.round(skill * 10) / 10);
+    return player(`p${String(index).padStart(2, "0")}`, Math.round(skill * 10) / 10);
   });
 }
 
@@ -63,11 +61,6 @@ function simulate(players: EnginePlayer[], courts: number, rounds: number, salt 
   return { plans, sched, ledger };
 }
 
-function patterns(plan: RoundPlan, players: EnginePlayer[]): GenderPattern[] {
-  const genderOf = (id: string) => players.find((item) => item.id === id)?.gender ?? "male";
-  return plan.matches.map((match) => matchPattern(genderOf, match.teamA, match.teamB));
-}
-
 function playingIds(plan: RoundPlan): string[] {
   return plan.matches.flatMap((match) => [...match.teamA, ...match.teamB]).sort();
 }
@@ -76,6 +69,11 @@ function teamPairs(plan: RoundPlan): string[] {
   return plan.matches
     .flatMap((match) => [pairKey(match.teamA[0], match.teamA[1]), pairKey(match.teamB[0], match.teamB[1])])
     .sort();
+}
+
+function totals(plan: RoundPlan, players: EnginePlayer[]): number[] {
+  const skillOf = (id: string) => players.find((item) => item.id === id)?.skill ?? 0;
+  return plan.matches.flatMap((match) => [teamRatingTotal(skillOf, match.teamA), teamRatingTotal(skillOf, match.teamB)]);
 }
 
 function assertCovered(plan: RoundPlan, players: EnginePlayer[]) {
@@ -97,84 +95,47 @@ describe("court spots", () => {
   });
 });
 
-describe("gender balance", () => {
-  it("never puts two women against two men when another shape exists", () => {
-    const { plans } = simulate(balancedEight(), 2, 6);
-    for (const plan of plans) {
-      expect(patterns(plan, balancedEight())).not.toContain("women_vs_men");
+describe("team floor", () => {
+  it("allows 2.0 with 3.0 and refuses 2.0 with 2.0 when a legal split exists", () => {
+    const players = [player("a", 2), player("b", 2), player("c", 3), player("d", 3)];
+    const plan = planRound(players, fresh(players), emptyLedger(), 1, 1, 1);
+    const match = plan.matches[0];
+    expect(match).toBeDefined();
+    if (!match) return;
+    expect(teamPairs(plan)).toEqual(["a|c", "b|d"].sort() ? ["a|c", "a|d", "b|c", "b|d"].filter((key) => teamPairs(plan).includes(key)) : []);
+    for (const team of [match.teamA, match.teamB]) {
+      const skills = team.map((id) => players.find((item) => item.id === id)?.skill ?? 0).sort();
+      expect(skills).toEqual([2, 3]);
     }
+    expect(match.short).toBeFalsy();
+    expect(totals(plan, players).every((total) => total >= 5)).toBe(true);
   });
 
-  it("keeps two women from partnering against two men in a mostly-male draw", () => {
-    const players = [
-      player("f1", "female", 3.5),
-      player("f2", "female", 4.2),
-      ...Array.from({ length: 6 }, (_, index) => player(`m${index}`, "male", 3 + index * 0.3)),
-    ];
-    const plan = planRound(players, fresh(players), emptyLedger(), 2, 1, 3);
-    expect(patterns(plan, players)).not.toContain("women_vs_men");
-    const partners = plan.matches.flatMap((match) => [match.teamA, match.teamB]);
-    const womenTogether = partners.some((team) => team.includes("f1") && team.includes("f2"));
-    expect(womenTogether).toBe(false);
-  });
-
-  it("still refuses a women-vs-men split when that split would avoid repeat partners", () => {
-    const players = [
-      player("f1", "female", 4),
-      player("f2", "female", 4),
-      player("m1", "male", 4),
-      player("m2", "male", 4),
-    ];
-    const ledger = emptyLedger();
-    ledger.partners["f1|m1"] = 5;
-    ledger.partners["f2|m2"] = 5;
-    ledger.partners["f1|m2"] = 5;
-    ledger.partners["f2|m1"] = 5;
-    const plan = planRound(players, fresh(players), ledger, 1, 2, 1);
-    expect(patterns(plan, players)).toEqual(["mixed_mixed"]);
-  });
-
-  it("allows mixed-vs-men when the court is three men and one woman", () => {
-    const players = [
-      player("f", "female", 3.5),
-      player("m1", "male", 3.5),
-      player("m2", "male", 4),
-      player("m3", "male", 4.5),
-    ];
-    const plan = planRound(players, fresh(players), emptyLedger(), 1, 1, 1);
-    expect(patterns(plan, players)).toEqual(["mixed_same"]);
-  });
-});
-
-describe("skill balance", () => {
-  it("pairs 2.5s with 5.5s instead of stacking the strong players", () => {
-    const players = [
-      player("a", "male", 2.5),
-      player("b", "male", 5.5),
-      player("c", "female", 2.5),
-      player("d", "female", 5.5),
-    ];
+  it("falls back to the highest possible worst team and flags the game", () => {
+    const players = [player("a", 2), player("b", 2), player("c", 2.1), player("d", 4.5)];
     const plan = planRound(players, fresh(players), emptyLedger(), 1, 1, 1);
     const match = plan.matches[0];
-    expect(match).toBeDefined();
-    if (!match) return;
-    expect(teamSkillGap((id) => players.find((item) => item.id === id)?.skill ?? 0, match.teamA, match.teamB)).toBe(0);
-    expect(patterns(plan, players)).toEqual(["mixed_mixed"]);
+    expect(match?.short).toBe(true);
+    const lows = [match?.teamA, match?.teamB].map((team) =>
+      (team ?? []).reduce((sum, id) => sum + (players.find((item) => item.id === id)?.skill ?? 0), 0),
+    );
+    expect(Math.min(...lows)).toBeCloseTo(4.1, 5);
+    expect(teamPairs(plan)).not.toContain("a|b");
   });
 
-  it("balances an all-men court by team total", () => {
-    const players = [
-      player("a", "male", 2.5),
-      player("b", "male", 3),
-      player("c", "male", 5),
-      player("d", "male", 5.5),
-    ];
+  it("still builds a game when every pair is under 5.0", () => {
+    const players = [player("a", 2), player("b", 2), player("c", 2), player("d", 2)];
+    const plan = planRound(players, fresh(players), emptyLedger(), 1, 1, 3);
+    expect(plan.matches).toHaveLength(1);
+    expect(plan.matches[0]?.short).toBe(true);
+    expect(Math.min(...totals(plan, players))).toBeCloseTo(4, 5);
+  });
+
+  it("prunes to legal teams before spending the soft costs", () => {
+    const players = [player("low1", 2), player("low2", 2.2), player("high1", 3.2), player("high2", 4)];
     const plan = planRound(players, fresh(players), emptyLedger(), 1, 1, 1);
-    const match = plan.matches[0];
-    expect(match).toBeDefined();
-    if (!match) return;
-    expect(teamSkillGap((id) => players.find((item) => item.id === id)?.skill ?? 0, match.teamA, match.teamB)).toBe(0);
-    expect(patterns(plan, players)).toEqual(["same_same"]);
+    expect(plan.matches[0]?.short).toBeFalsy();
+    expect(totals(plan, players).every((total) => total >= 5)).toBe(true);
   });
 });
 
@@ -183,7 +144,7 @@ describe("sit-outs", () => {
     const players = many(5);
     const { plans, sched } = simulate(players, 1, 5);
     expect(plans.every((plan) => plan.courtsUsed === 1 && plan.sittingOut.length === 1)).toBe(true);
-    for (const player of players) expect(sched[player.id]?.sitOuts).toBe(1);
+    for (const item of players) expect(sched[item.id]?.sitOuts).toBe(1);
     for (let index = 1; index < plans.length; index += 1) {
       expect(plans[index]?.sittingOut).not.toEqual(plans[index - 1]?.sittingOut);
     }
@@ -216,9 +177,59 @@ describe("sit-outs", () => {
     const players = many(9);
     const { sched, plans } = simulate(players, 2, 9);
     expect(plans.every((plan) => plan.courtsUsed === 2 && plan.sittingOut.length === 1)).toBe(true);
-    for (const player of players) {
-      expect(sched[player.id]?.sitOuts).toBe(1);
-      expect(sched[player.id]?.gamesPlayed).toBe(8);
+    for (const item of players) {
+      expect(sched[item.id]?.sitOuts).toBe(1);
+      expect(sched[item.id]?.gamesPlayed).toBe(8);
+    }
+  });
+
+  it("keeps a player with fewer games on court even when sitting them would be easier", () => {
+    const players = [player("due", 2), player("b", 4), player("c", 4), player("d", 4), player("e", 4)];
+    const sched = fresh(players);
+    for (const item of players) {
+      if (item.id === "due") continue;
+      const state = sched[item.id];
+      if (state) state.scheduleGames = 1;
+    }
+    const plan = planRound(players, sched, emptyLedger(), 1, 2, 1);
+    expect(plan.sittingOut).not.toContain("due");
+    expect(playingIds(plan)).toContain("due");
+  });
+
+  it("picks different sitters from a fairness tie when the salt changes", () => {
+    const players = [0, 1, 2, 3, 4].map((index) => player(`p${index}`, 4));
+    const sched = fresh(players);
+    const due = sched.p0;
+    if (due) due.scheduleGames = 0;
+    for (const id of ["p1", "p2", "p3", "p4"]) {
+      const state = sched[id];
+      if (state) state.scheduleGames = 1;
+    }
+    const sitters = new Set<string>();
+    for (let salt = 1; salt <= 12; salt += 1) {
+      const plan = planRound(players, sched, emptyLedger(), 1, 3, salt);
+      expect(plan.sittingOut).not.toContain("p0");
+      expect(plan.sittingOut).toHaveLength(1);
+      const sitter = plan.sittingOut[0];
+      if (sitter) sitters.add(sitter);
+    }
+    expect(sitters.size).toBeGreaterThan(1);
+  });
+
+  it("prefers a tied bench that leaves a 5.0 inward pairing", () => {
+    const players = [
+      player("w1", 2),
+      player("w2", 2),
+      player("w3", 2),
+      player("w4", 2),
+      player("s1", 4),
+      player("s2", 4),
+    ];
+    for (let salt = 1; salt <= 8; salt += 1) {
+      const plan = planRound(players, fresh(players), emptyLedger(), 1, 1, salt, { variety: salt });
+      expect(plan.sittingOut.every((id) => id.startsWith("w"))).toBe(true);
+      expect(inwardFeasible(players.filter((item) => !plan.sittingOut.includes(item.id)))).toBe(true);
+      expect(plan.matches[0]?.short).toBeFalsy();
     }
   });
 });
@@ -251,7 +262,7 @@ describe("sit-out mix avoids repeat partners", () => {
     const { plans, sched } = simulate(players, courts, rounds, 9);
     for (const plan of plans) {
       assertCovered(plan, players);
-      for (const match of plan.matches) expect(isLowHighStack(players, match.teamA, match.teamB)).toBe(false);
+      expect(plan.matches.every((match) => !match.short)).toBe(true);
     }
     for (let index = 1; index < plans.length; index += 1) {
       const previous = plans[index - 1];
@@ -282,28 +293,22 @@ describe("sit-out mix avoids repeat partners", () => {
   });
 
   it("keeps the same rule for 5 players on one court and 10 players on two courts", () => {
-    const men = many(5, "men");
-    const { plans, sched } = simulate(men, 1, 5, 9);
+    const group = many(5);
+    const { plans, sched } = simulate(group, 1, 5, 9);
     for (let index = 1; index < plans.length; index += 1) {
       const previous = plans[index - 1];
       const next = plans[index];
       if (!previous || !next) continue;
       assertNoImmediateRepeat(previous, next);
       assertSittersMixed(previous, next);
-      for (const match of next.matches) expect(isLowHighStack(men, match.teamA, match.teamB)).toBe(false);
     }
-    const games = men.map((item) => sched[item.id]?.gamesPlayed ?? -1);
+    const games = group.map((item) => sched[item.id]?.gamesPlayed ?? -1);
     expect(Math.max(...games) - Math.min(...games)).toBeLessThanOrEqual(1);
     assertNight(10, 2, 5);
   });
 
-  it("breaks last round's partners when another lineup is not a stack or women versus men", () => {
-    const players = [
-      player("a", "male", 2.5),
-      player("b", "male", 3.5),
-      player("c", "male", 4.5),
-      player("d", "male", 5.5),
-    ];
+  it("breaks last round's partners when another lineup is available", () => {
+    const players = [player("a", 2.5), player("b", 3.5), player("c", 4.5), player("d", 5.5)];
     const ledger = emptyLedger();
     ledger.lastPartners["a|d"] = 1;
     ledger.lastPartners["b|c"] = 1;
@@ -318,16 +323,27 @@ describe("sit-out mix avoids repeat partners", () => {
       state.gamesPlayed = 1;
     }
     const plan = planRound(players, sched, ledger, 1, 2, 1);
-    const match = plan.matches[0];
-    expect(match).toBeDefined();
-    if (!match) return;
-    expect(isLowHighStack(players, match.teamA, match.teamB)).toBe(false);
-    const sides = [match.teamA, match.teamB].map((team) => pairKey(team[0], team[1])).sort();
-    expect(sides).toEqual(["a|c", "b|d"]);
+    expect(teamPairs(plan).sort()).toEqual(["a|c", "b|d"]);
   });
 });
 
 describe("partner and opponent variety", () => {
+  it("weighs opponent repeats enough to matter and still under a partner repeat", () => {
+    expect(WEIGHT.opponentEach).toBeGreaterThanOrEqual(800);
+    expect(WEIGHT.opponentEach * 4).toBeLessThan(WEIGHT.partnerEach);
+    expect(WEIGHT.unmixedPair).toBe(50_000);
+    expect(WEIGHT.consecutivePartner).toBeGreaterThan(WEIGHT.unmixedPair);
+    expect(WEIGHT.skillOverTenth).toBeGreaterThan(WEIGHT.skillTenth);
+  });
+
+  it("avoids a repeated opponent matchup when the players are otherwise even", () => {
+    const players = [player("a", 4), player("b", 4), player("c", 4), player("d", 4)];
+    const ledger = emptyLedger();
+    for (const pair of ["a|c", "a|d", "b|c", "b|d"]) ledger.opponents[pair] = 4;
+    const plan = planRound(players, fresh(players), ledger, 1, 2, 1);
+    expect(teamPairs(plan).sort()).not.toEqual(["a|b", "c|d"]);
+  });
+
   it("does not repeat a partnership in the first three rounds when everyone plays", () => {
     const players = balancedEight().map((item) => ({ ...item, skill: 4 }));
     const { ledger } = simulate(players, 2, 3, 11);
@@ -346,99 +362,33 @@ describe("partner and opponent variety", () => {
       second.matches.map((match) => [match.teamA, match.teamB]),
     );
   });
-});
-
-describe("no low-high stack", () => {
-  function expectSplit(players: EnginePlayer[], salt = 1, ledger = emptyLedger()) {
-    const plan = planRound(players, fresh(players), ledger, 1, 1, salt);
-    const match = plan.matches[0];
-    expect(match).toBeDefined();
-    if (!match) return;
-    expect(isLowHighStack(players, match.teamA, match.teamB)).toBe(false);
-  }
-
-  it("puts a strong player with a developing player on each side", () => {
-    const players = [
-      player("a", "male", 2.5),
-      player("b", "male", 3),
-      player("c", "male", 5),
-      player("d", "male", 5.5),
-    ];
-    expectSplit(players);
-    const plan = planRound(players, fresh(players), emptyLedger(), 1, 1, 1);
-    const match = plan.matches[0];
-    expect(match).toBeDefined();
-    if (!match) return;
-    const sides = [match.teamA, match.teamB].map((team) => [...team].sort().join("+")).sort();
-    expect(sides).toEqual(["a+d", "b+c"]);
-  });
-
-  it("still refuses the stack when repeat partners would prefer it", () => {
-    const players = [
-      player("low1", "male", 2.5),
-      player("low2", "male", 3),
-      player("high1", "male", 5),
-      player("high2", "male", 5.5),
-    ];
-    const ledger = emptyLedger();
-    ledger.partners["high2|low1"] = 8;
-    ledger.partners["high1|low2"] = 8;
-    ledger.partners["high1|low1"] = 8;
-    ledger.partners["high2|low2"] = 8;
-    expectSplit(players, 4, ledger);
-  });
-
-  it("keeps every court split when skills differ", () => {
-    const players = many(12);
-    let ledger = emptyLedger();
-    let sched = fresh(players);
-    for (let round = 1; round <= 4; round += 1) {
-      const plan = planRound(players, sched, ledger, 3, round, 5);
-      for (const match of plan.matches) {
-        expect(isLowHighStack(players, match.teamA, match.teamB)).toBe(false);
-      }
-      const applied = applyRound(sched, ledger, plan);
-      sched = applied.sched;
-      ledger = applied.ledger;
-    }
-  });
 
   it("can choose a different fair lineup when asked to reshuffle", () => {
     const players = many(8).map((item) => ({ ...item, skill: 4 }));
     const first = planRound(players, fresh(players), emptyLedger(), 2, 1, 3);
     const again = planRound(players, fresh(players), emptyLedger(), 2, 1, 3, {
       variety: 19,
-      avoidKey: assignmentKey(first.matches),
+      avoidKey: lineupKey(first.matches, first.sittingOut),
     });
     expect(assignmentKey(again.matches)).not.toBe(assignmentKey(first.matches));
     expect(again.sittingOut).toEqual(first.sittingOut);
-    expect(patterns(again, players)).not.toContain("women_vs_men");
+    expect(again.matches.every((match) => !match.short)).toBe(true);
   });
 });
 
 describe("partner evenness", () => {
-  it("accepts a wider skill gap to avoid a repeat partnership", () => {
-    const players = [
-      player("a", "male", 2),
-      player("b", "male", 4),
-      player("c", "male", 4.5),
-      player("d", "male", 6),
-    ];
+  it("accepts a small skill gap to avoid a repeat partnership", () => {
+    const players = [player("a", 3), player("b", 3.2), player("c", 3.4), player("d", 3.6)];
     const ledger = emptyLedger();
     ledger.partners[pairKey("a", "d")] = 1;
     ledger.partners[pairKey("b", "c")] = 1;
     const plan = planRound(players, fresh(players), ledger, 1, 1, 1);
     expect(teamPairs(plan)).toEqual(["a|c", "b|d"]);
-    expect(isLowHighStack(players, plan.matches[0]?.teamA ?? [], plan.matches[0]?.teamB ?? [])).toBe(false);
+    expect(teamSkillGap((id) => players.find((item) => item.id === id)?.skill ?? 0, plan.matches[0]?.teamA ?? ["a", "c"], plan.matches[0]?.teamB ?? ["b", "d"])).toBeCloseTo(0.4, 5);
   });
 
   it("does not repeat last round's partners when the history counts are still empty", () => {
-    const players = [
-      player("a", "male", 4),
-      player("b", "male", 4),
-      player("c", "male", 4),
-      player("d", "male", 4),
-    ];
+    const players = [player("a", 4), player("b", 4), player("c", 4), player("d", 4)];
     const ledger = emptyLedger();
     ledger.lastPartners[pairKey("a", "b")] = 1;
     ledger.lastPartners[pairKey("c", "d")] = 1;
@@ -448,80 +398,27 @@ describe("partner evenness", () => {
   });
 
   it("does not repeat a partnership on back-to-back rounds", () => {
-    const players = [
-      player("a", "male", 3.5),
-      player("b", "male", 4),
-      player("c", "male", 4),
-      player("d", "male", 4.5),
-    ];
+    const players = [player("a", 3.5), player("b", 4), player("c", 4), player("d", 4.5)];
     const { plans } = simulate(players, 1, 2, 3);
     const first = new Set(teamPairs(plans[0] ?? { roundNumber: 0, courtsUsed: 0, matches: [], sittingOut: [] }));
     for (const key of teamPairs(plans[1] ?? { roundNumber: 0, courtsUsed: 0, matches: [], sittingOut: [] })) {
       expect(first.has(key)).toBe(false);
     }
   });
-});
 
-describe("protecting lower-rated players", () => {
-  it("does not give the lowest-rated players a court of their own when a mixed lineup exists", () => {
-    const lows = ["a", "b", "c", "d"];
-    const highs = ["e", "f", "g", "h"];
-    const players = [
-      ...lows.map((id) => player(id, "female" as const, 2)),
-      ...highs.map((id) => player(id, "male" as const, 5)),
-    ];
-    const ledger = emptyLedger();
-    for (const low of lows) {
-      for (const high of highs) ledger.partners[pairKey(low, high)] = 1;
-    }
-    const plan = planRound(players, fresh(players), ledger, 2, 1, 4);
-    expect(patterns(plan, players)).not.toContain("women_vs_men");
-    for (const match of plan.matches) {
-      for (const team of [match.teamA, match.teamB]) {
-        expect(team.filter((id) => lows.includes(id))).toHaveLength(1);
-      }
-    }
-  });
-
-  it("keeps the two lowest apart even when every other partnership is already used", () => {
-    const players = [
-      player("low1", "male", 2.5),
-      player("low2", "male", 3),
-      player("mid1", "male", 4),
-      player("mid2", "male", 4.5),
-      player("mid3", "female", 4.2),
-      player("mid4", "female", 4.8),
-      player("high1", "male", 5.2),
-      player("high2", "female", 5.5),
-    ];
-    const ledger = emptyLedger();
-    const ids = players.map((item) => item.id);
-    for (let left = 0; left < ids.length; left += 1) {
-      for (let right = left + 1; right < ids.length; right += 1) {
-        const a = ids[left];
-        const b = ids[right];
-        if (!a || !b || (a === "low1" && b === "low2")) continue;
-        ledger.partners[pairKey(a, b)] = 2;
-      }
-    }
-    const plan = planRound(players, fresh(players), ledger, 2, 3, 2);
-    for (const match of plan.matches) {
-      expect(match.teamA.includes("low1") && match.teamA.includes("low2")).toBe(false);
-      expect(match.teamB.includes("low1") && match.teamB.includes("low2")).toBe(false);
-      expect(isLowHighStack(players, match.teamA, match.teamB)).toBe(false);
-    }
-    expect(patterns(plan, players)).not.toContain("women_vs_men");
+  it("adds a steep cost above a 1.0 team gap without refusing the game", () => {
+    const players = [player("a", 2), player("b", 2), player("c", 5), player("d", 5.5)];
+    const plan = planRound(players, fresh(players), emptyLedger(), 1, 1, 1);
+    expect(plan.matches).toHaveLength(1);
+    expect(plan.matches[0]?.short).toBeFalsy();
+    const gap = teamSkillGap((id) => players.find((item) => item.id === id)?.skill ?? 0, plan.matches[0]?.teamA ?? ["a", "c"], plan.matches[0]?.teamB ?? ["b", "d"]);
+    expect(gap).toBeLessThanOrEqual(1);
   });
 });
 
 describe("sit-out returners", () => {
   it("partners players coming back from a sit with people who stayed", () => {
-    const players = [
-      player("r1", "male", 2.5),
-      player("r2", "male", 5.5),
-      player("s1", "male", 3),
-      player("s2", "male", 5),
-    ];
+    const players = [player("r1", 2.5), player("r2", 5.5), player("s1", 3), player("s2", 5)];
     const sched = fresh(players);
     const returning = sched.r1;
     const returningToo = sched.r2;
@@ -538,11 +435,11 @@ describe("sit-out returners", () => {
 });
 
 describe("large draws", () => {
-  it("still avoids women vs men when four courts are full", () => {
+  it("fills four courts from ratings alone", () => {
     const players = many(16);
     const plan = planRound(players, fresh(players), emptyLedger(), 4, 1, 2);
     expect(plan.courtsUsed).toBe(4);
-    expect(patterns(plan, players)).not.toContain("women_vs_men");
+    expect(plan.matches.every((match) => !match.short)).toBe(true);
     assertCovered(plan, players);
   });
 });

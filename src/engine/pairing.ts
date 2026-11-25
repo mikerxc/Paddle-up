@@ -1,41 +1,23 @@
-import type { Gender } from "../model.ts";
-
 /**
- * Doubles planner for open play.
+ * Doubles planner for open play. Ratings only — gender is not an input.
  *
- * Sit-outs: the players with the fewest scheduled games play. Among a tie,
- * whoever played least recently goes first, then whoever has sat more.
- * A full cycle with a stable group keeps games and sits within one of each
- * other. One court is just this rule with 4 spots.
+ * Who sits is decided before the lineup search. Games played and sit-outs are
+ * a hard fairness order. People tied on that order are chosen with the round
+ * salt (and the reshuffle variety), preferring a set that can pair to 5.0.
  *
- * Late arrivals get no priority and no guaranteed next game. Their scheduling
- * counter is set to the group's current minimum, and their "last played"
- * marker matches the most recent player in that group, so they join the
- * normal rotation. They are not given phantom sit-outs for rounds they missed,
- * and they are not left at zero games, which would make them play every
- * remaining round.
+ * Every team total, each rating rounded to 0.1, must be at least 5.0.
+ * 2.0 with 3.0 is allowed. 2.0 with 2.0 is not, unless no legal teams exist.
+ * Then the search keeps the lineup whose worst team total is as high as
+ * possible and marks those games short.
  *
- * Pairing: search the lineups and reject women-vs-men unless nothing else
- * exists. Mixed-vs-mixed and same-gender-vs-same-gender are both preferred.
- * Team skill totals stay close, but a small gap is allowed when it rotates
- * partners and opponents.
- *
- * On a court of four, the two lowest-rated players are not paired together
- * against the two highest when the skills differ. The search keeps a
- * strong+developing team on each side of the net instead. The lowest-rated
- * players in the whole round are also kept off the same team when another
- * fair lineup exists, including a court of equally low players.
- *
- * After any round, at any group size, players coming back from a sit-out are
- * mixed with players who stayed on court. Nobody partners with the same
- * person two rounds in a row when another lineup still avoids a women-vs-men
- * match and a low-vs-high stack. Older partner counts outweigh team-skill
- * gap, but they stay under that mix and the protections above.
+ * Soft, and never a reason to cancel a game: spread partners, spread
+ * opponents, keep team totals close, and don't repeat a partnership from the
+ * immediately previous round. Players coming back from a sit are mixed with
+ * players who stayed on when both groups are in the round.
  */
 
 export interface EnginePlayer {
   id: string;
-  gender: Gender;
   skill: number;
 }
 
@@ -59,6 +41,8 @@ export interface PlannedMatch {
   court: number;
   teamA: [string, string];
   teamB: [string, string];
+  /** Set when this game could not reach the 5.0 team floor. */
+  short?: boolean;
 }
 
 export interface RoundPlan {
@@ -68,36 +52,33 @@ export interface RoundPlan {
   sittingOut: string[];
 }
 
-export type GenderPattern = "mixed_mixed" | "same_same" | "mixed_same" | "women_vs_men";
-
 /**
- * Weights are compared directly. Each tier stays larger than a realistic
- * total of the tiers under it. Who sits is chosen before this search.
+ * Weights are compared directly. Sit-outs and the 5.0 floor are decided
+ * outside this scale. Each soft tier stays under the near-hard rules above it.
  */
 export const WEIGHT = {
-  womenVsMen: 1_000_000_000,
-  /** Two lowest on a court versus the two highest on that court. */
-  stackedSkills: 100_000_000,
-  /** Lowest-rated players in the whole round are partners. */
-  lowestPair: 10_000_000,
-  /**
-   * Same partnership as the immediately previous round.
-   * Below a low-high stack, above mixing and older repeat counts.
-   */
+  /** Same partnership as the immediately previous round. */
   consecutivePartner: 1_000_000,
   /** Two returners together, or two stayers together, when the other group is also playing. */
   unmixedPair: 50_000,
-  /** One earlier game together. Outweighs skill gap, under the mix rule. */
+  /** One earlier game as partners. */
   partnerEach: 6_000,
-  mixedSame: 800,
-  /** Cost of a 0.1 gap between the two team skill totals. A full point is 200. */
+  /** One earlier game as opponents. Four cross-pairs stay under one partner repeat. */
+  opponentEach: 1_100,
+  /** Cost of a 0.1 gap between the two team skill totals. */
   skillTenth: 20,
-  opponentEach: 140,
+  /** Extra cost for each 0.1 of gap above 1.0. Soft — it never blocks a game. */
+  skillOverTenth: 500,
   courtSkew: 4,
 } as const;
 
-/** How far above the best soft cost a reshuffle may reach to find another fair lineup. */
-const VARIETY_BAND = 300;
+/** A reshuffle may leave the optimal soft cost, but not the floor, the mix rule, or back-to-back partners. */
+const VARIETY_BAND = 40_000;
+
+/** Combined team rating, in tenths, required before a game is a normal game. */
+export const TEAM_FLOOR_TENTHS = 50;
+
+const SITTER_ENUM_LIMIT = 4_000;
 
 export function newSched(): SchedState {
   return {
@@ -126,6 +107,26 @@ export function courtsFor(playerCount: number, courts: number): number {
   return Math.min(courts, Math.floor(playerCount / 4));
 }
 
+export function skillTenths(skill: number): number {
+  return Math.round(skill * 10);
+}
+
+export function teamRatingTotal(skillOf: (id: string) => number, team: [string, string]): number {
+  return (skillTenths(skillOf(team[0])) + skillTenths(skillOf(team[1]))) / 10;
+}
+
+export function matchIsShort(
+  skillOf: (id: string) => number,
+  teamA: [string, string],
+  teamB: [string, string],
+): boolean {
+  return teamRatingTotal(skillOf, teamA) < TEAM_FLOOR_TENTHS / 10 || teamRatingTotal(skillOf, teamB) < TEAM_FLOOR_TENTHS / 10;
+}
+
+export function lineupKey(matches: readonly PlannedMatch[], sitting: readonly string[]): string {
+  return `${planKey(matches)}::${[...sitting].sort().join(",")}`;
+}
+
 function fnv(text: string): number {
   let hash = 2166136261;
   for (let i = 0; i < text.length; i += 1) {
@@ -135,53 +136,109 @@ function fnv(text: string): number {
   return hash >>> 0;
 }
 
-function skillTenths(skill: number): number {
-  return Math.round(skill * 10);
-}
-
-export function teamKind(genderOf: (id: string) => Gender, team: [string, string]): "F" | "M" | "X" {
-  const left = genderOf(team[0]);
-  const right = genderOf(team[1]);
-  if (left === "female" && right === "female") return "F";
-  if (left === "male" && right === "male") return "M";
-  return "X";
-}
-
-export function genderPattern(left: "F" | "M" | "X", right: "F" | "M" | "X"): GenderPattern {
-  if ((left === "F" && right === "M") || (left === "M" && right === "F")) return "women_vs_men";
-  if (left === "X" && right === "X") return "mixed_mixed";
-  if (left === right) return "same_same";
-  return "mixed_same";
-}
-
-export function matchPattern(
-  genderOf: (id: string) => Gender,
-  teamA: [string, string],
-  teamB: [string, string],
-): GenderPattern {
-  return genderPattern(teamKind(genderOf, teamA), teamKind(genderOf, teamB));
-}
-
 function schedOf(sched: Record<string, SchedState>, id: string): SchedState {
   return sched[id] ?? newSched();
 }
 
-function comparePlay(
-  a: EnginePlayer,
-  b: EnginePlayer,
-  sched: Record<string, SchedState>,
-  roundNumber: number,
-  salt: number,
-): number {
-  const sa = schedOf(sched, a.id);
-  const sb = schedOf(sched, b.id);
-  if (sa.scheduleGames !== sb.scheduleGames) return sa.scheduleGames - sb.scheduleGames;
-  if (sa.lastPlayedRound !== sb.lastPlayedRound) return sa.lastPlayedRound - sb.lastPlayedRound;
-  if (sa.sitOuts !== sb.sitOuts) return sb.sitOuts - sa.sitOuts;
-  const hashA = fnv(`${a.id}#${roundNumber}#${salt}`);
-  const hashB = fnv(`${b.id}#${roundNumber}#${salt}`);
-  if (hashA !== hashB) return hashA < hashB ? -1 : 1;
-  return a.id < b.id ? -1 : 1;
+/** Lower tuple plays sooner: fewer scheduled games, then more sit-outs. */
+function fairTuple(state: SchedState): [number, number] {
+  return [state.scheduleGames, -state.sitOuts];
+}
+
+function fairCmp(a: [number, number], b: [number, number]): number {
+  if (a[0] !== b[0]) return a[0] - b[0];
+  return a[1] - b[1];
+}
+
+function bySkillThenId(a: EnginePlayer, b: EnginePlayer): number {
+  if (a.skill !== b.skill) return a.skill - b.skill;
+  return a.id.localeCompare(b.id);
+}
+
+function teamTenthsOf(a: EnginePlayer, b: EnginePlayer): number {
+  return skillTenths(a.skill) + skillTenths(b.skill);
+}
+
+/** Sort, then pair the lowest with the highest inward. Every pair must clear 5.0. */
+export function inwardFeasible(playing: readonly EnginePlayer[]): boolean {
+  if (playing.length === 0 || playing.length % 2 !== 0) return playing.length === 0;
+  const sorted = [...playing].sort(bySkillThenId);
+  for (let index = 0; index < sorted.length / 2; index += 1) {
+    const low = sorted[index];
+    const high = sorted[sorted.length - 1 - index];
+    if (!low || !high || teamTenthsOf(low, high) < TEAM_FLOOR_TENTHS) return false;
+  }
+  return true;
+}
+
+function combinations<T>(items: readonly T[], count: number): T[][] {
+  const found: T[][] = [];
+  const pick: T[] = [];
+  const walk = (start: number) => {
+    if (pick.length === count) {
+      found.push([...pick]);
+      return;
+    }
+    for (let index = start; index < items.length; index += 1) {
+      const item = items[index];
+      if (item === undefined) continue;
+      pick.push(item);
+      walk(index + 1);
+      pick.pop();
+    }
+  };
+  walk(0);
+  return found;
+}
+
+function binomExceeds(n: number, k: number, limit: number): boolean {
+  if (k < 0 || k > n) return false;
+  const use = Math.min(k, n - k);
+  let value = 1;
+  for (let index = 1; index <= use; index += 1) {
+    value = (value * (n - use + index)) / index;
+    if (value > limit) return true;
+  }
+  return false;
+}
+
+function mulberry32(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function sampleCombinations(items: readonly EnginePlayer[], count: number, seed: number): EnginePlayer[][] {
+  if (!binomExceeds(items.length, count, SITTER_ENUM_LIMIT)) return combinations(items, count);
+  const found: EnginePlayer[][] = [];
+  const seen = new Set<string>();
+  const add = (combo: EnginePlayer[]) => {
+    const key = combo.map((player) => player.id).sort().join(",");
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push(combo);
+  };
+  const bySkill = [...items].sort(bySkillThenId);
+  add(bySkill.slice(0, count));
+  add(bySkill.slice(-count));
+  const random = mulberry32(seed);
+  for (let attempt = 0; found.length < 400 && attempt < 2_000; attempt += 1) {
+    const copy = [...items];
+    for (let index = 0; index < count; index += 1) {
+      const swap = index + Math.floor(random() * (copy.length - index));
+      const left = copy[index];
+      const right = copy[swap];
+      if (!left || !right) continue;
+      copy[index] = right;
+      copy[swap] = left;
+    }
+    add(copy.slice(0, count));
+  }
+  return found;
 }
 
 function choosePlaying(
@@ -190,9 +247,51 @@ function choosePlaying(
   spots: number,
   roundNumber: number,
   salt: number,
+  variety: number,
 ): { playing: EnginePlayer[]; sittingOut: string[] } {
-  const ranked = [...players].sort((a, b) => comparePlay(a, b, sched, roundNumber, salt));
-  const playing = ranked.slice(0, spots);
+  if (spots <= 0) {
+    return { playing: [], sittingOut: players.map((player) => player.id).sort() };
+  }
+  if (spots >= players.length) {
+    return { playing: [...players], sittingOut: [] };
+  }
+  const ranked = [...players].sort((a, b) => {
+    const diff = fairCmp(fairTuple(schedOf(sched, a.id)), fairTuple(schedOf(sched, b.id)));
+    if (diff !== 0) return diff;
+    return a.id < b.id ? -1 : 1;
+  });
+  const pivot = ranked[spots - 1];
+  if (!pivot) return { playing: ranked.slice(0, spots), sittingOut: [] };
+  const pivotFair = fairTuple(schedOf(sched, pivot.id));
+  const mustPlay = ranked.filter((player) => fairCmp(fairTuple(schedOf(sched, player.id)), pivotFair) < 0);
+  const tied = ranked.filter((player) => fairCmp(fairTuple(schedOf(sched, player.id)), pivotFair) === 0);
+  const sitCount = tied.length - (spots - mustPlay.length);
+  const options =
+    sitCount <= 0
+      ? [[]]
+      : sampleCombinations(tied, sitCount, fnv(`${roundNumber}#${salt}#${variety}#sit`));
+  let bestSit = options[0] ?? [];
+  let bestFeasible = Number.POSITIVE_INFINITY;
+  let bestHash = Number.POSITIVE_INFINITY;
+  let bestKey = "";
+  for (const sitting of options) {
+    const sitIds = new Set(sitting.map((player) => player.id));
+    const playing = [...mustPlay, ...tied.filter((player) => !sitIds.has(player.id))];
+    const feasible = inwardFeasible(playing) ? 0 : 1;
+    const key = sitting.map((player) => player.id).sort().join(",");
+    const hash = fnv(`${key}|${roundNumber}|${salt}|${variety}`);
+    if (
+      feasible < bestFeasible ||
+      (feasible === bestFeasible && (hash < bestHash || (hash === bestHash && key < bestKey)))
+    ) {
+      bestFeasible = feasible;
+      bestHash = hash;
+      bestKey = key;
+      bestSit = sitting;
+    }
+  }
+  const sitIds = new Set(bestSit.map((player) => player.id));
+  const playing = [...mustPlay, ...tied.filter((player) => !sitIds.has(player.id))];
   const playingIds = new Set(playing.map((player) => player.id));
   const sittingOut = players
     .filter((player) => !playingIds.has(player.id))
@@ -214,26 +313,6 @@ function splitsOf(group: EnginePlayer[]): Split[] {
     { teamA: [a, c], teamB: [b, d] },
     { teamA: [a, d], teamB: [b, c] },
   ];
-}
-
-function combinations<T>(items: readonly T[], count: number): T[][] {
-  const found: T[][] = [];
-  const pick: T[] = [];
-  const walk = (start: number) => {
-    if (pick.length === count) {
-      found.push([...pick]);
-      return;
-    }
-    for (let index = start; index < items.length; index += 1) {
-      const item = items[index];
-      if (item === undefined) continue;
-      pick.push(item);
-      walk(index + 1);
-      pick.pop();
-    }
-  };
-  walk(0);
-  return found;
 }
 
 function partitions(players: EnginePlayer[]): EnginePlayer[][][] {
@@ -265,30 +344,10 @@ function orderTeam(a: EnginePlayer, b: EnginePlayer): [string, string] {
   return a.id < b.id ? [a.id, b.id] : [b.id, a.id];
 }
 
-function isStackedSplit(split: Split): boolean {
-  const players = [split.teamA[0], split.teamA[1], split.teamB[0], split.teamB[1]];
-  return isLowHighStack(players, [split.teamA[0].id, split.teamA[1].id], [split.teamB[0].id, split.teamB[1].id]);
-}
-
 interface MixContext {
   lastPartners: Record<string, number>;
   stayers: ReadonlySet<string>;
   returners: ReadonlySet<string>;
-  lowestBan: ReadonlySet<string>;
-}
-
-/** Players at the bottom of the round who should not partner each other. */
-function lowestBanIds(players: readonly EnginePlayer[]): Set<string> {
-  if (players.length < 2) return new Set();
-  const sorted = [...players].sort(bySkillThenId);
-  const lowest = sorted[0];
-  const highest = sorted[sorted.length - 1];
-  if (!lowest || !highest || lowest.skill === highest.skill) return new Set();
-  const atMin = sorted.filter((player) => player.skill === lowest.skill);
-  if (atMin.length >= 2) return new Set(atMin.map((player) => player.id));
-  const second = sorted[1];
-  if (!second || second.skill === highest.skill) return new Set();
-  return new Set([lowest.id, second.id]);
 }
 
 function mixContext(
@@ -304,7 +363,7 @@ function mixContext(
     if (state.lastPlayedRound === roundNumber - 1) stayers.add(player.id);
     else if (state.lastSatRound === roundNumber - 1) returners.add(player.id);
   }
-  return { lastPartners: ledger.lastPartners ?? {}, stayers, returners, lowestBan: lowestBanIds(playing) };
+  return { lastPartners: ledger.lastPartners ?? {}, stayers, returners };
 }
 
 function sameCohort(mix: MixContext, a: string, b: string): boolean {
@@ -315,34 +374,35 @@ function sameCohort(mix: MixContext, a: string, b: string): boolean {
   return left !== "" && left === right;
 }
 
-function splitCost(
+function floorOf(split: Split): number {
+  return Math.min(teamTenthsOf(split.teamA[0], split.teamA[1]), teamTenthsOf(split.teamB[0], split.teamB[1]));
+}
+
+function gapCost(sumA: number, sumB: number): number {
+  const gap = Math.abs(sumA - sumB);
+  let cost = gap * WEIGHT.skillTenth;
+  if (gap > 10) cost += (gap - 10) * WEIGHT.skillOverTenth;
+  return cost;
+}
+
+function softCost(
   split: Split,
   ledger: Ledger,
-  byId: Map<string, EnginePlayer>,
   totalTenths: number,
   playerCount: number,
   mix: MixContext,
 ): number {
-  const genderOf = (id: string) => byId.get(id)?.gender ?? "male";
   const teamA = orderTeam(split.teamA[0], split.teamA[1]);
   const teamB = orderTeam(split.teamB[0], split.teamB[1]);
-  const pattern = matchPattern(genderOf, teamA, teamB);
-  let cost = 0;
-  if (pattern === "women_vs_men") cost += WEIGHT.womenVsMen;
-  else if (pattern === "mixed_same") cost += WEIGHT.mixedSame;
-  if (isStackedSplit(split)) cost += WEIGHT.stackedSkills;
-  const sumA = skillTenths(split.teamA[0].skill) + skillTenths(split.teamA[1].skill);
-  const sumB = skillTenths(split.teamB[0].skill) + skillTenths(split.teamB[1].skill);
-  cost += Math.abs(sumA - sumB) * WEIGHT.skillTenth;
+  const sumA = teamTenthsOf(split.teamA[0], split.teamA[1]);
+  const sumB = teamTenthsOf(split.teamB[0], split.teamB[1]);
+  let cost = gapCost(sumA, sumB);
   cost += pairCount(ledger.partners, teamA[0], teamA[1]) * WEIGHT.partnerEach;
   cost += pairCount(ledger.partners, teamB[0], teamB[1]) * WEIGHT.partnerEach;
   for (const left of teamA) {
     for (const right of teamB) cost += pairCount(ledger.opponents, left, right) * WEIGHT.opponentEach;
   }
   for (const team of [teamA, teamB]) {
-    if (mix.lowestBan.size >= 2 && mix.lowestBan.has(team[0]) && mix.lowestBan.has(team[1])) {
-      cost += WEIGHT.lowestPair;
-    }
     if (pairCount(mix.lastPartners, team[0], team[1]) > 0) cost += WEIGHT.consecutivePartner;
     if (sameCohort(mix, team[0], team[1])) cost += WEIGHT.unmixedPair;
   }
@@ -357,6 +417,7 @@ function toMatch(split: Split, court: number): PlannedMatch {
     court,
     teamA: orderTeam(split.teamA[0], split.teamA[1]),
     teamB: orderTeam(split.teamB[0], split.teamB[1]),
+    short: floorOf(split) < TEAM_FLOOR_TENTHS,
   };
 }
 
@@ -376,12 +437,6 @@ function numberCourts(matches: PlannedMatch[]): PlannedMatch[] {
     .map((match, index) => ({ ...match, court: index + 1 }));
 }
 
-interface ScoredPlan {
-  cost: number;
-  key: string;
-  matches: PlannedMatch[];
-}
-
 function copyMatches(matches: PlannedMatch[]): PlannedMatch[] {
   return matches.map((match) => ({
     ...match,
@@ -390,107 +445,157 @@ function copyMatches(matches: PlannedMatch[]): PlannedMatch[] {
   }));
 }
 
-function selectPlan(best: PlannedMatch[], band: ScoredPlan[], bestCost: number, variety: number, avoidKey: string): PlannedMatch[] {
-  if (!variety && !avoidKey) return best;
-  const viable = new Map<string, ScoredPlan>();
-  for (const item of band) {
-    if (item.cost > bestCost + VARIETY_BAND) continue;
-    const prev = viable.get(item.key);
-    if (!prev || item.cost < prev.cost) viable.set(item.key, item);
-  }
-  if (best.length > 0) {
-    const key = planKey(best);
-    const prev = viable.get(key);
-    if (!prev || bestCost < prev.cost) viable.set(key, { cost: bestCost, key, matches: best });
-  }
-  const pool = [...viable.values()];
-  if (pool.length === 0) return best;
-  const costs = [...new Set(pool.map((item) => item.cost))].sort((a, b) => a - b);
-  for (const cost of costs) {
-    if (cost > bestCost + VARIETY_BAND) break;
-    let tier = pool.filter((item) => item.cost === cost);
-    if (avoidKey) {
-      const different = tier.filter((item) => item.key !== avoidKey);
-      if (different.length === 0) continue;
-      tier = different;
-    }
-    tier.sort((a, b) => {
-      const hashA = fnv(`${a.key}#${variety}`);
-      const hashB = fnv(`${b.key}#${variety}`);
-      if (hashA !== hashB) return hashA < hashB ? -1 : 1;
-      return a.key < b.key ? -1 : 1;
-    });
-    return tier[0]?.matches ?? best;
-  }
-  return best;
+interface Leaf {
+  cost: number;
+  minTeam: number;
+  legal: boolean;
+  key: string;
+  matches: PlannedMatch[];
 }
 
-function bestAssignment(playing: EnginePlayer[], ledger: Ledger, mix: MixContext, variety = 0, avoidKey = ""): PlannedMatch[] {
-  if (playing.length === 0) return [];
-  if (playing.length > 12) return hillClimb(playing, ledger, mix, variety, avoidKey);
-  const byId = new Map(playing.map((player) => [player.id, player]));
-  const totalTenths = playing.reduce((sum, player) => sum + skillTenths(player.skill), 0);
-  let bestCost = Number.POSITIVE_INFINITY;
-  let bestKey = "";
-  let best: PlannedMatch[] = [];
-  const band: ScoredPlan[] = [];
-  const wantsChoice = variety !== 0 || avoidKey !== "";
+function betterOptimum(candidate: Leaf, current: Leaf): boolean {
+  if (candidate.legal !== current.legal) return candidate.legal;
+  if (!candidate.legal && candidate.minTeam !== current.minTeam) return candidate.minTeam > current.minTeam;
+  if (candidate.cost !== current.cost) return candidate.cost < current.cost;
+  return candidate.key < current.key;
+}
 
-  for (const groups of partitions(playing)) {
-    const options = groups.map((group) => splitsOf(group));
-    const walk = (index: number, acc: PlannedMatch[], cost: number) => {
-      if (!wantsChoice && cost > bestCost) return;
-      if (wantsChoice && cost > bestCost + VARIETY_BAND) return;
-      if (index === options.length) {
-        const key = planKey(acc);
-        const matches = copyMatches(acc);
-        if (cost < bestCost || (cost === bestCost && key < bestKey)) {
-          bestCost = cost;
-          bestKey = key;
-          best = matches;
+function betterChoice(candidate: Leaf, current: Leaf, variety: number): boolean {
+  if (candidate.cost !== current.cost) return candidate.cost < current.cost;
+  const left = fnv(`${candidate.key}#${variety}`);
+  const right = fnv(`${current.key}#${variety}`);
+  if (left !== right) return left < right;
+  return candidate.key < current.key;
+}
+
+interface SearchOptions {
+  variety: number;
+  avoidMatches: ReadonlySet<string>;
+  explore: boolean;
+}
+
+function exactAssignment(
+  playing: EnginePlayer[],
+  ledger: Ledger,
+  mix: MixContext,
+  options: SearchOptions,
+): PlannedMatch[] {
+  const totalTenths = playing.reduce((sum, player) => sum + skillTenths(player.skill), 0);
+  const groupsList = partitions(playing);
+
+  const run = (requireLegal: boolean): Leaf | null => {
+    const found = { leaf: null as Leaf | null };
+    for (const groups of groupsList) {
+      const splits = groups.map((group) => {
+        const all = splitsOf(group);
+        if (!requireLegal) return all;
+        return all.filter((split) => floorOf(split) >= TEAM_FLOOR_TENTHS);
+      });
+      if (splits.some((list) => list.length === 0)) continue;
+      const walk = (index: number, acc: PlannedMatch[], cost: number, minTeam: number) => {
+        const optimum = found.leaf;
+        if (optimum) {
+          if (requireLegal && cost > optimum.cost) return;
+          if (!requireLegal && minTeam < optimum.minTeam) return;
+          if (!requireLegal && minTeam === optimum.minTeam && cost > optimum.cost) return;
         }
-        if (wantsChoice) band.push({ cost, key, matches });
+        if (index === splits.length) {
+          const key = planKey(acc);
+          const leaf: Leaf = {
+            cost,
+            minTeam,
+            legal: minTeam >= TEAM_FLOOR_TENTHS,
+            key,
+            matches: copyMatches(acc),
+          };
+          if (!found.leaf || betterOptimum(leaf, found.leaf)) found.leaf = leaf;
+          return;
+        }
+        for (const split of splits[index] ?? []) {
+          walk(index + 1, [...acc, toMatch(split, index + 1)], cost + softCost(split, ledger, totalTenths, playing.length, mix), Math.min(minTeam, floorOf(split)));
+        }
+      };
+      walk(0, [], 0, Number.POSITIVE_INFINITY);
+    }
+    return found.leaf;
+  };
+
+  const legal = run(true);
+  const optimum = legal ?? run(false);
+  if (!optimum) return [];
+  if (!options.explore && options.avoidMatches.size === 0) return optimum.matches;
+
+  const picked = { leaf: null as Leaf | null };
+  const band = VARIETY_BAND;
+  for (const groups of groupsList) {
+    const splits = groups.map((group) => {
+      const all = splitsOf(group);
+      if (optimum.legal) return all.filter((split) => floorOf(split) >= TEAM_FLOOR_TENTHS);
+      return all;
+    });
+    if (splits.some((list) => list.length === 0)) continue;
+    const walk = (index: number, acc: PlannedMatch[], cost: number, minTeam: number) => {
+      if (optimum.legal && cost > optimum.cost + band) return;
+      if (!optimum.legal && minTeam < optimum.minTeam) return;
+      if (!optimum.legal && minTeam === optimum.minTeam && cost > optimum.cost + band) return;
+      if (index === splits.length) {
+        if (!optimum.legal && minTeam !== optimum.minTeam) return;
+        if (cost > optimum.cost + band) return;
+        const key = planKey(acc);
+        if (options.avoidMatches.has(key)) return;
+        const leaf: Leaf = {
+          cost,
+          minTeam,
+          legal: minTeam >= TEAM_FLOOR_TENTHS,
+          key,
+          matches: copyMatches(acc),
+        };
+        if (!picked.leaf || betterChoice(leaf, picked.leaf, options.variety)) picked.leaf = leaf;
         return;
       }
-      const splits = options[index] ?? [];
-      for (const split of splits) {
-        const added = splitCost(split, ledger, byId, totalTenths, playing.length, mix);
-        walk(index + 1, [...acc, toMatch(split, index + 1)], cost + added);
+      for (const split of splits[index] ?? []) {
+        walk(
+          index + 1,
+          [...acc, toMatch(split, index + 1)],
+          cost + softCost(split, ledger, totalTenths, playing.length, mix),
+          Math.min(minTeam, floorOf(split)),
+        );
       }
     };
-    walk(0, [], 0);
+    walk(0, [], 0, Number.POSITIVE_INFINITY);
   }
-  return numberCourts(selectPlan(best, band, bestCost, variety, avoidKey));
-}
-
-function bySkillThenId(a: EnginePlayer, b: EnginePlayer): number {
-  if (a.skill !== b.skill) return a.skill - b.skill;
-  return a.id.localeCompare(b.id);
+  return (picked.leaf ?? optimum).matches;
 }
 
 function dealCourts(players: EnginePlayer[], courtCount: number): EnginePlayer[][] {
+  const sorted = [...players].sort(bySkillThenId);
+  const pairs: EnginePlayer[][] = [];
+  let low = 0;
+  let high = sorted.length - 1;
+  while (low < high) {
+    const left = sorted[low];
+    const right = sorted[high];
+    if (left && right) pairs.push([left, right]);
+    low += 1;
+    high -= 1;
+  }
   const groups: EnginePlayer[][] = Array.from({ length: courtCount }, () => []);
-  const women = players.filter((player) => player.gender === "female").sort(bySkillThenId);
-  const men = players.filter((player) => player.gender === "male").sort(bySkillThenId);
-  for (let court = 0; court < courtCount; court += 1) {
-    const start = Math.round((court * women.length) / courtCount);
-    const end = Math.round(((court + 1) * women.length) / courtCount);
-    const group = groups[court];
-    if (!group) continue;
-    for (let index = start; index < end; index += 1) {
-      const player = women[index];
-      if (player) group.push(player);
-    }
-  }
-  let manIndex = 0;
-  for (const group of groups) {
-    while (group.length < 4 && manIndex < men.length) {
-      const player = men[manIndex];
-      if (player) group.push(player);
-      manIndex += 1;
-    }
-  }
+  pairs.forEach((pair, index) => {
+    groups[index % courtCount]?.push(...pair);
+  });
   return groups;
+}
+
+function climbCost(
+  split: Split,
+  ledger: Ledger,
+  totalTenths: number,
+  playerCount: number,
+  mix: MixContext,
+): number {
+  const floor = floorOf(split);
+  const penalty = floor >= TEAM_FLOOR_TENTHS ? 0 : (TEAM_FLOOR_TENTHS - floor) * 100_000_000;
+  return penalty + softCost(split, ledger, totalTenths, playerCount, mix);
 }
 
 function bestSplit(
@@ -499,9 +604,8 @@ function bestSplit(
   totalTenths: number,
   playerCount: number,
   mix: MixContext,
-  variety = 0,
+  variety: number,
 ): PlannedMatch {
-  const byId = new Map(group.map((player) => [player.id, player]));
   let best: PlannedMatch | null = null;
   let bestCost = Number.POSITIVE_INFINITY;
   let bestKey = "";
@@ -509,16 +613,14 @@ function bestSplit(
     const match = toMatch(split, 1);
     const key = planKey([match]);
     const jitter = variety ? fnv(`${key}#${variety}`) % 11 : 0;
-    const cost = splitCost(split, ledger, byId, totalTenths, playerCount, mix) + jitter;
+    const cost = climbCost(split, ledger, totalTenths, playerCount, mix) + jitter;
     if (cost < bestCost || (cost === bestCost && key < bestKey)) {
       bestCost = cost;
       bestKey = key;
       best = match;
     }
   }
-  if (!best) {
-    throw new Error("A court of four players has no team split.");
-  }
+  if (!best) throw new Error("A court of four players has no team split.");
   return best;
 }
 
@@ -530,25 +632,10 @@ function assignmentCost(matches: PlannedMatch[], playing: EnginePlayer[], ledger
     const teamA = match.teamA.map((id) => byId.get(id)).filter((player): player is EnginePlayer => !!player);
     const teamB = match.teamB.map((id) => byId.get(id)).filter((player): player is EnginePlayer => !!player);
     if (teamA.length !== 2 || teamB.length !== 2) continue;
-    const split: Split = {
-      teamA: [teamA[0], teamA[1]],
-      teamB: [teamB[0], teamB[1]],
-    };
-    cost += splitCost(split, ledger, byId, totalTenths, playing.length, mix);
+    const split: Split = { teamA: [teamA[0], teamA[1]], teamB: [teamB[0], teamB[1]] };
+    cost += climbCost(split, ledger, totalTenths, playing.length, mix);
   }
   return cost;
-}
-
-function hillClimb(playing: EnginePlayer[], ledger: Ledger, mix: MixContext, variety = 0, avoidKey = ""): PlannedMatch[] {
-  const climb = (seed: number) => climbOnce(playing, ledger, mix, seed);
-  let matches = climb(variety);
-  if (!variety && !avoidKey) return matches;
-  for (let attempt = 0; attempt < 5 && assignmentKey(matches) === avoidKey; attempt += 1) {
-    const next = climb(variety + attempt + 1);
-    if (assignmentKey(next) !== avoidKey) return next;
-    matches = next;
-  }
-  return matches;
 }
 
 function climbOnce(playing: EnginePlayer[], ledger: Ledger, mix: MixContext, variety: number): PlannedMatch[] {
@@ -558,7 +645,6 @@ function climbOnce(playing: EnginePlayer[], ledger: Ledger, mix: MixContext, var
   let matches = numberCourts(groups.map((group) => bestSplit(group, ledger, totalTenths, playing.length, mix, variety)));
   let bestCost = assignmentCost(matches, playing, ledger, mix);
   let bestKey = planKey(matches);
-
   for (let pass = 0; pass < 24; pass += 1) {
     let improved = false;
     for (let left = 0; left < groups.length; left += 1) {
@@ -580,7 +666,9 @@ function climbOnce(playing: EnginePlayer[], ledger: Ledger, mix: MixContext, var
               if (index === right) return nextB;
               return group;
             });
-            const trial = numberCourts(trialGroups.map((group) => bestSplit(group, ledger, totalTenths, playing.length, mix, variety)));
+            const trial = numberCourts(
+              trialGroups.map((group) => bestSplit(group, ledger, totalTenths, playing.length, mix, variety)),
+            );
             const cost = assignmentCost(trial, playing, ledger, mix);
             const key = planKey(trial);
             if (cost < bestCost || (cost === bestCost && key < bestKey)) {
@@ -600,6 +688,34 @@ function climbOnce(playing: EnginePlayer[], ledger: Ledger, mix: MixContext, var
   return matches;
 }
 
+function hillClimb(playing: EnginePlayer[], ledger: Ledger, mix: MixContext, options: SearchOptions): PlannedMatch[] {
+  const first = climbOnce(playing, ledger, mix, options.variety);
+  if (!options.explore || !options.avoidMatches.has(planKey(first))) return first;
+  const second = climbOnce(playing, ledger, mix, options.variety + 1 || 1);
+  if (!options.avoidMatches.has(planKey(second))) return second;
+  return first;
+}
+
+function bestAssignment(
+  playing: EnginePlayer[],
+  ledger: Ledger,
+  mix: MixContext,
+  options: SearchOptions,
+): PlannedMatch[] {
+  if (playing.length === 0) return [];
+  if (playing.length > 12) return hillClimb(playing, ledger, mix, options);
+  return exactAssignment(playing, ledger, mix, options);
+}
+
+export interface PlanVariety {
+  /** Non-zero asks for another fair lineup when one exists. */
+  variety?: number;
+  /** One lineup to skip when another fair one is available. */
+  avoidKey?: string;
+  /** Every lineup already shown for this round. */
+  avoidKeys?: readonly string[];
+}
+
 export function planRound(
   players: EnginePlayer[],
   sched: Record<string, SchedState>,
@@ -610,14 +726,42 @@ export function planRound(
   variety?: PlanVariety,
 ): RoundPlan {
   const spots = courtsFor(players.length, courts) * 4;
-  const { playing, sittingOut } = choosePlaying(players, sched, spots, roundNumber, salt);
-  const mix = mixContext(playing, sched, ledger, roundNumber);
-  return {
-    roundNumber,
-    courtsUsed: playing.length / 4,
-    matches: bestAssignment(playing, ledger, mix, variety?.variety ?? 0, variety?.avoidKey ?? ""),
-    sittingOut,
-  };
+  const avoidFull = new Set<string>();
+  if (variety?.avoidKey) avoidFull.add(variety.avoidKey);
+  for (const key of variety?.avoidKeys ?? []) avoidFull.add(key);
+  const avoidMatches = new Set([...avoidFull].map((key) => key.split("::")[0] ?? key));
+  const baseVariety = variety?.variety ?? 0;
+  const big = players.length > 12 || spots > 8;
+  const tries = avoidFull.size === 0 && baseVariety === 0 ? 1 : big ? 1 : 8;
+  let chosen: RoundPlan | null = null;
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    const twist = attempt === 0 ? baseVariety : fnv(`${baseVariety}#${roundNumber}#${attempt}`) || attempt;
+    const { playing, sittingOut } = choosePlaying(players, sched, spots, roundNumber, salt, twist);
+    const mix = mixContext(playing, sched, ledger, roundNumber);
+    const matches = numberCourts(
+      bestAssignment(playing, ledger, mix, {
+        variety: twist,
+        avoidMatches,
+        explore: twist !== 0 || avoidFull.size > 0,
+      }),
+    );
+    const plan: RoundPlan = {
+      roundNumber,
+      courtsUsed: playing.length / 4,
+      matches,
+      sittingOut,
+    };
+    chosen = plan;
+    if (!avoidFull.has(lineupKey(matches, sittingOut))) break;
+  }
+  return (
+    chosen ?? {
+      roundNumber,
+      courtsUsed: 0,
+      matches: [],
+      sittingOut: players.map((player) => player.id).sort(),
+    }
+  );
 }
 
 export function applyRound(
@@ -674,35 +818,6 @@ export function teamSkillGap(
   return Math.abs(sum(teamA) - sum(teamB)) / 10;
 }
 
-/** True when one team is the two lowest-rated players and the other is the two highest. */
-export function isLowHighStack(
-  players: readonly { id: string; skill: number }[],
-  teamA: readonly string[],
-  teamB: readonly string[],
-): boolean {
-  const ids = [...teamA, ...teamB];
-  if (ids.length !== 4 || new Set(ids).size !== 4) return false;
-  const skillOf = new Map(players.map((player) => [player.id, player.skill]));
-  const ranked = [...ids].sort((a, b) => {
-    const diff = (skillOf.get(a) ?? 0) - (skillOf.get(b) ?? 0);
-    if (diff !== 0) return diff;
-    return a < b ? -1 : a > b ? 1 : 0;
-  });
-  const low = skillOf.get(ranked[0] ?? "");
-  const high = skillOf.get(ranked[3] ?? "");
-  if (low === undefined || high === undefined || low === high) return false;
-  const lowest = new Set(ranked.slice(0, 2));
-  const isLowPair = (team: readonly string[]) => team.every((id) => lowest.has(id));
-  return isLowPair(teamA) || isLowPair(teamB);
-}
-
 export function assignmentKey(matches: readonly PlannedMatch[]): string {
   return planKey(matches);
-}
-
-export interface PlanVariety {
-  /** Non-zero asks for a different fair lineup when one exists. */
-  variety?: number;
-  /** Lineup to skip when another fair one is available. */
-  avoidKey?: string;
 }

@@ -11,13 +11,12 @@ import { buildBackup, parseBackup, type BackupFile } from "../storage.ts";
 const HOST_PIN = "000";
 
 export function SettingsScreen() {
-  const { store, dispatch } = useApp();
+  const { store, dispatch, hostUnlocked, setHostUnlocked } = useApp();
   const settings = store.settings;
   const fileRef = useRef<HTMLInputElement>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [pending, setPending] = useState<BackupFile | null>(null);
   const [hostPin, setHostPin] = useState("");
-  const [hostUnlocked, setHostUnlocked] = useState(false);
   const [pinWrong, setPinWrong] = useState(false);
   const set = (patch: Partial<typeof settings>) => dispatch({ type: "set-settings", patch });
 
@@ -66,7 +65,7 @@ export function SettingsScreen() {
         {hostUnlocked ? (
           <>
             <p className="mb-2 text-base font-semibold text-muted">
-              Off by default. Turn this on only if you want to view or set a hidden skill before round one. Closing Settings locks this again.
+              Skill numbers show on Players while this is unlocked. Lock hides them again. A refresh locks them too. Scores never change a rating.
             </p>
             <Button
               size="lg"
@@ -81,7 +80,7 @@ export function SettingsScreen() {
               <div className="mt-3">
                 <h3 className="text-lg font-black">Starting skill</h3>
                 <p className="mb-2 text-base font-semibold text-muted">
-                  New players begin here, from 2.0 to 5.5. Finished games nudge it quietly. Nobody else sees the number.
+                  New players begin here, from 2.0 to 5.5. Only a host edit changes a rating.
                 </p>
                 <Stepper
                   label="starting skill"
@@ -94,6 +93,18 @@ export function SettingsScreen() {
                 />
               </div>
             )}
+            <Button
+              size="lg"
+              full
+              variant="secondary"
+              data-testid="host-lock"
+              onClick={() => {
+                setHostUnlocked(false);
+                if (settings.hostSkills) set({ hostSkills: false });
+              }}
+            >
+              Lock host controls
+            </Button>
           </>
         ) : (
           <>

@@ -3,7 +3,7 @@ import { SKILL_MAX, SKILL_MIN, type Player, type Round } from "../model.ts";
 import { expectedWin, learnFromRound, ratingDelta } from "./skill.ts";
 
 function player(id: string, skill: number): Player {
-  return { id, name: id, gender: "female", skill, createdAt: 1 };
+  return { id, name: id, skill, createdAt: 1 };
 }
 
 function round(scoreA: number, scoreB: number, teamA: [string, string], teamB: [string, string]): Round {

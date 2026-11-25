@@ -3,9 +3,8 @@ import { useApp } from "../app-context.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { Sheet } from "../components/ui/dialog.tsx";
 import { activeRound, presentIds, roundUndoCount } from "../engine/session.ts";
-import { matchPattern } from "../engine/pairing.ts";
-import { finalScoreIssue, scoreStatus } from "../engine/scoring.ts";
-import { genderMark, MAX_COURTS, MAX_SCORE, playerName, type Match, type Player, type Round, type Session } from "../model.ts";
+import { scoreStatus, type ScoreStatus } from "../engine/scoring.ts";
+import { MAX_COURTS, MAX_SCORE, playerName, type Match, type Player, type Round, type Session } from "../model.ts";
 
 export function PlayScreen() {
   const { store, dispatch } = useApp();
@@ -22,45 +21,58 @@ export function PlayScreen() {
 
   return (
     <div className="flex min-h-dvh flex-col">
-      <header className="sticky top-0 z-20 border-b-2 border-ink bg-paper px-3 py-3">
-        <div className="flex items-center gap-2">
+      <header className="sticky top-0 z-20 border-b-2 border-ink bg-paper px-2 py-1.5">
+        <div className="flex items-center gap-1.5">
           <Button
             variant="yellow"
+            className="h-10 px-2"
             data-testid="undo"
+            disabled={undoCount === 0}
             aria-label={undoCount > 0 ? `Undo ${undoCount} this round` : "Undo"}
             onClick={() => dispatch({ type: "undo" })}
           >
             Undo{undoCount > 0 ? ` ${undoCount}` : ""}
           </Button>
-          <p className="min-w-0 flex-1 text-center text-lg font-black">
+          <p className="min-w-0 flex-1 text-center text-base font-black leading-tight">
             {round ? `Round ${round.number}` : "Between rounds"}
           </p>
-          <Button variant="secondary" onClick={() => dispatch({ type: "nav", view: { name: "home" } })}>
-            Home
-          </Button>
-        </div>
-        <p className="mt-2 text-center text-base font-bold">
-          {here} here · to {session.rules.pointsToWin}, win by {session.rules.winBy}, no cap
-        </p>
-      </header>
-      <div className="flex flex-col gap-3 px-3 py-3 pb-28">
-        <div className="flex items-center justify-between gap-2 rounded-xl border-2 border-ink bg-card px-3 py-2">
-          <span className="font-black">Courts</span>
-          <div className="flex items-center gap-2">
-            <Button variant="secondary" size="icon" aria-label="Fewer courts" data-testid="court-minus" disabled={session.rules.courts <= 1} onClick={() => dispatch({ type: "set-settings", patch: { courts: session.rules.courts - 1 } })}>
+          <div className="flex items-center gap-0.5">
+            <Button
+              variant="secondary"
+              className="h-10 w-10 text-xl"
+              aria-label="Fewer courts"
+              data-testid="court-minus"
+              disabled={session.rules.courts <= 1}
+              onClick={() => dispatch({ type: "set-settings", patch: { courts: session.rules.courts - 1 } })}
+            >
               −
             </Button>
-            <span className="w-8 text-center text-2xl font-black tabular-nums" data-testid="court-count">
+            <span className="w-5 text-center text-lg font-black tabular-nums" data-testid="court-count">
               {session.rules.courts}
             </span>
-            <Button variant="secondary" size="icon" aria-label="More courts" data-testid="court-plus" disabled={session.rules.courts >= MAX_COURTS} onClick={() => dispatch({ type: "set-settings", patch: { courts: session.rules.courts + 1 } })}>
+            <Button
+              variant="secondary"
+              className="h-10 w-10 text-xl"
+              aria-label="More courts"
+              data-testid="court-plus"
+              disabled={session.rules.courts >= MAX_COURTS}
+              onClick={() => dispatch({ type: "set-settings", patch: { courts: session.rules.courts + 1 } })}
+            >
               +
             </Button>
           </div>
+          <Button variant="secondary" className="h-10 px-2" onClick={() => dispatch({ type: "nav", view: { name: "home" } })}>
+            Home
+          </Button>
         </div>
+        <p className="text-center text-xs font-bold text-muted">
+          {here} here · to {session.rules.pointsToWin}, win by {session.rules.winBy}
+        </p>
+      </header>
+      <div className="flex flex-col gap-2 px-2 py-2 pb-24">
         {round && round.matches.length < session.rules.courts && (
-          <p className="text-base font-bold">
-            Using {round.matches.length} of {session.rules.courts} courts. Four players fill a court.
+          <p className="text-center text-xs font-bold">
+            Using {round.matches.length} of {session.rules.courts} courts.
           </p>
         )}
         {round ? (
@@ -86,47 +98,52 @@ export function PlayScreen() {
                 }
               />
             ))}
-            <section className="rounded-2xl border-2 border-ink bg-ball/40 p-3">
-              <h2 className="text-lg font-black">Sitting this round</h2>
-              {round.sittingOut.length === 0 ? (
-                <p className="mt-1 font-semibold">Everyone is on a court.</p>
-              ) : (
-                <div className="mt-2 flex flex-col gap-2">
-                  {round.sittingOut.map((id) => (
+            <section className="rounded-lg border border-ink/50 bg-ball/40 px-2 py-1" data-testid="sitting-strip">
+              <p className="text-sm leading-tight font-bold">
+                <span className="font-black">Sitting this round</span>
+                {round.sittingOut.length === 0 ? (
+                  <span className="font-semibold"> · Everyone is on a court.</span>
+                ) : (
+                  round.sittingOut.map((id) => (
                     <button
                       key={id}
                       type="button"
-                      className="min-h-12 rounded-xl border-2 border-ink bg-ball px-3 text-left text-lg font-black"
+                      className="ml-1.5 inline-flex min-h-11 items-center rounded-md px-1 font-black"
                       onClick={() => setPicked(id)}
                     >
                       {labelFor(store.players, id)}
                     </button>
-                  ))}
-                </div>
-              )}
+                  ))
+                )}
+              </p>
             </section>
           </>
         ) : (
           <section className="rounded-2xl border-2 border-ink bg-card p-3">
             <h2 className="text-xl font-black">Planned rounds are done.</h2>
-            <p className="mt-1 font-semibold">Next round keeps the teams balanced and rotates who sits. Keep going until you end the session.</p>
+            <p className="mt-1 font-semibold">Next round keeps the teams balanced and rotates who sits.</p>
           </section>
         )}
         {upcoming.length > 0 && (
-          <section className="rounded-2xl border-2 border-dashed border-ink p-3">
+          <section data-testid="up-next">
             <h2 className="text-lg font-black">Up next</h2>
-            {upcoming.slice(0, 2).map((item) => (
-              <div key={item.id} className="mt-2 border-t-2 border-ink/15 pt-2 first:mt-2 first:border-0 first:pt-0">
-                <p className="font-black">Round {item.number}</p>
+            {upcoming.slice(0, 8).map((item) => (
+              <article key={item.id} className="mt-2 rounded-2xl border-2 border-ink bg-white p-3 text-ink" data-testid={`upcoming-${item.number}`}>
+                <h3 className="text-lg font-black">Round {item.number}</h3>
                 {item.matches.map((match) => (
-                  <p key={match.id} className="font-semibold">
-                    Court {match.court}: {playerName(store.players, match.teamA[0])} & {playerName(store.players, match.teamA[1])} vs {playerName(store.players, match.teamB[0])} & {playerName(store.players, match.teamB[1])}
-                  </p>
+                  <div key={match.id} className="mt-3">
+                    <p className="text-xs font-black tracking-[0.14em] text-ink">COURT {match.court}</p>
+                    <p className="truncate text-base font-bold whitespace-nowrap">{teamLabel(store.players, match.teamA)}</p>
+                    <p className="text-base font-black">vs</p>
+                    <p className="truncate text-base font-bold whitespace-nowrap">{teamLabel(store.players, match.teamB)}</p>
+                  </div>
                 ))}
-                <p className="font-semibold">
-                  {item.sittingOut.length ? `Sitting: ${item.sittingOut.map((id) => playerName(store.players, id)).join(", ")}` : "Nobody sitting"}
+                <p className="mt-3 text-sm font-semibold text-muted">
+                  {item.sittingOut.length
+                    ? `Bench: ${item.sittingOut.map((id) => playerName(store.players, id)).join(", ")}`
+                    : "Bench: nobody"}
                 </p>
-              </div>
+              </article>
             ))}
           </section>
         )}
@@ -194,7 +211,7 @@ export function PlayScreen() {
           dispatch({ type: "nav", view: { name: "edit", playerId: null, arriveAfter: true } });
         }}
       />
-      <Sheet open={endOpen} onOpenChange={setEndOpen} title="End session?" description="Wins, losses, and the log stay on this phone. Undo brings the session back.">
+      <Sheet open={endOpen} onOpenChange={setEndOpen} title="End session?" description="Wins, losses, and the log stay on this phone.">
         <Button
           size="lg"
           full
@@ -228,6 +245,18 @@ function labelFor(players: Player[], id: string) {
   return players.find((item) => item.id === id)?.name ?? "Player";
 }
 
+function teamLabel(players: Player[], ids: [string, string]) {
+  return `${playerName(players, ids[0])} & ${playerName(players, ids[1])}`;
+}
+
+function statusLabel(status: ScoreStatus, winBy: number): string {
+  if (status === "final") return "Game";
+  if (status === "need-margin") return `Win by ${winBy}`;
+  if (status === "overshot") return "Check score";
+  if (status === "playing") return "In progress";
+  return "Ready";
+}
+
 function MatchCard({
   match,
   players,
@@ -245,53 +274,45 @@ function MatchCard({
   onNudge: (side: "A" | "B", delta: number) => void;
   onOpenPad: (side: "A" | "B") => void;
 }) {
-  const genderOf = (id: string) => players.find((player) => player.id === id)?.gender ?? "male";
-  const pattern = matchPattern(genderOf, match.teamA, match.teamB);
   const status = scoreStatus(match.scoreA, match.scoreB, pointsToWin, winBy);
-  const issue = finalScoreIssue(match.scoreA, match.scoreB, pointsToWin, winBy);
-  const tone = status === "final" ? "bg-good" : status === "need-margin" || status === "overshot" ? "bg-bad" : "bg-[#083820] text-white";
   return (
-    <section className="overflow-hidden rounded-3xl border-2 border-ink bg-[#0c4f2e] shadow-[0_6px_0_#1a140c]" data-testid={`court-${match.court}`}>
-      <h2 className="bg-[#083820] px-3 py-2 text-center text-sm font-black tracking-[0.2em] text-ball uppercase">Court {match.court}</h2>
-      <div className="court-surface">
-        <CourtSide
-          edge="far"
-          players={players}
-          ids={match.teamA}
-          score={match.scoreA}
-          side="A"
-          matchId={match.id}
-          onPlayer={onPlayer}
-          onNudge={onNudge}
-          onOpenPad={onOpenPad}
-        />
-        <div className="court-net" role="separator" aria-label="Net" />
-        <CourtSide
-          edge="near"
-          players={players}
-          ids={match.teamB}
-          score={match.scoreB}
-          side="B"
-          matchId={match.id}
-          onPlayer={onPlayer}
-          onNudge={onNudge}
-          onOpenPad={onOpenPad}
-        />
-      </div>
-      <p className={`px-3 py-2 text-base font-black ${tone}`} data-testid={`score-status-${match.court}`}>
-        {status === "final" && `Game. Win by ${winBy}.`}
-        {status === "need-margin" && `Win by ${winBy}. Keep playing.`}
-        {status === "overshot" && `Check this score. ${issue}`}
-        {status === "playing" && "In progress"}
-        {status === "empty" && "No points yet"}
-        {pattern === "women_vs_men" && " Women vs men. Swap if you can."}
-      </p>
+    <section className="overflow-hidden rounded-2xl border-2 border-ink bg-court text-white shadow-[0_4px_0_#1a140c]" data-testid={`court-${match.court}`}>
+      <h2 className="flex items-center justify-center gap-2 bg-[#083820] px-2 py-1.5 text-center text-xs font-black tracking-[0.14em] text-white uppercase">
+        <span data-testid={`score-status-${match.court}`}>
+          Court {match.court} · {statusLabel(status, winBy)}
+        </span>
+        {match.short && (
+          <span className="rounded-full bg-ball px-1.5 py-0.5 text-[10px] font-black tracking-normal text-ink normal-case" data-testid={`short-${match.court}`}>
+            ratings short
+          </span>
+        )}
+      </h2>
+      <CourtSide
+        players={players}
+        ids={match.teamA}
+        score={match.scoreA}
+        side="A"
+        matchId={match.id}
+        onPlayer={onPlayer}
+        onNudge={onNudge}
+        onOpenPad={onOpenPad}
+      />
+      <div className="court-net mx-2" role="separator" aria-label="Net" />
+      <CourtSide
+        players={players}
+        ids={match.teamB}
+        score={match.scoreB}
+        side="B"
+        matchId={match.id}
+        onPlayer={onPlayer}
+        onNudge={onNudge}
+        onOpenPad={onOpenPad}
+      />
     </section>
   );
 }
 
 function CourtSide({
-  edge,
   players,
   ids,
   score,
@@ -301,7 +322,6 @@ function CourtSide({
   onNudge,
   onOpenPad,
 }: {
-  edge: "far" | "near";
   players: Player[];
   ids: [string, string];
   score: number;
@@ -311,35 +331,32 @@ function CourtSide({
   onNudge: (side: "A" | "B", delta: number) => void;
   onOpenPad: (side: "A" | "B") => void;
 }) {
-  const names = (
-    <div className="grid grid-cols-2 gap-2">
-      {ids.map((id) => (
-        <button
-          key={id}
-          type="button"
-          className="min-h-11 truncate rounded-xl border-2 border-ink bg-paper px-2 text-center text-base font-black text-ink"
-          onClick={() => onPlayer(id)}
-        >
-          {labelFor(players, id)}
-        </button>
-      ))}
-    </div>
-  );
-  const scoreBlock = (
-    <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1 py-0.5">
-      <div />
+  return (
+    <div className="flex items-center gap-2 px-2 py-2.5">
+      <div className="flex min-w-0 flex-1 flex-col">
+        {ids.map((id) => (
+          <button
+            key={id}
+            type="button"
+            className="min-h-12 truncate text-left text-base font-black text-white"
+            onClick={() => onPlayer(id)}
+          >
+            {labelFor(players, id)}
+          </button>
+        ))}
+      </div>
       <button
         type="button"
-        className="min-h-16 min-w-[5.5rem] justify-self-center rounded-2xl border-2 border-white/90 bg-[#083820] px-3 text-5xl font-black tabular-nums text-white"
+        className="min-h-12 min-w-14 text-5xl leading-none font-black tabular-nums text-white"
         aria-label={`Set score ${score}`}
         onClick={() => onOpenPad(side)}
       >
         {score}
       </button>
-      <div className="flex flex-col items-end gap-1.5 justify-self-end">
+      <div className="flex items-center gap-1">
         <Button
           variant="yellow"
-          className="h-14 w-16 shrink-0 text-3xl"
+          className="h-12 w-12 shrink-0 text-2xl"
           data-testid={`score-plus-${matchId}-${side}`}
           aria-label="Plus one"
           onClick={() => onNudge(side, 1)}
@@ -348,7 +365,7 @@ function CourtSide({
         </Button>
         <Button
           variant="secondary"
-          className="h-14 w-16 shrink-0 text-3xl"
+          className="h-12 w-12 shrink-0 text-2xl"
           data-testid={`score-minus-${matchId}-${side}`}
           aria-label="Minus one"
           onClick={() => onNudge(side, -1)}
@@ -356,23 +373,6 @@ function CourtSide({
           −
         </Button>
       </div>
-    </div>
-  );
-  return (
-    <div className={`court-half ${edge === "far" ? "court-half-far" : "court-half-near"}`}>
-      {edge === "far" ? (
-        <>
-          {names}
-          {scoreBlock}
-          <div className="court-kitchen" />
-        </>
-      ) : (
-        <>
-          <div className="court-kitchen" />
-          {scoreBlock}
-          {names}
-        </>
-      )}
     </div>
   );
 }
@@ -404,7 +404,7 @@ function PlayerSheet({
   const attendance = session.attendance.find((att) => att.playerId === playerId);
   const alreadyLeaving = attendance?.leftAtRound !== null && attendance?.leftAtRound !== undefined;
   return (
-    <Sheet open={!!player && !!round} onOpenChange={(open) => !open && onClose()} title={player?.name ?? "Player"} description={player ? (player.gender === "female" ? "Female" : "Male") : undefined}>
+    <Sheet open={!!player && !!round} onOpenChange={(open) => !open && onClose()} title={player?.name ?? "Player"}>
       {player && playerId && round && (
         <div className="flex flex-col gap-2">
           {onCourt &&
@@ -468,7 +468,7 @@ function ArriveSheet({
         {options.length === 0 && <p className="font-semibold">Everyone in Players is already here.</p>}
         {options.map((player) => (
           <Button key={player.id} size="lg" full variant="secondary" data-testid={`arrive-${player.id}`} onClick={() => onArrive(player.id)}>
-            {player.name} · {genderMark(player.gender)}
+            {player.name}
           </Button>
         ))}
         <Button size="lg" full data-testid="arrive-new" onClick={onCreate}>

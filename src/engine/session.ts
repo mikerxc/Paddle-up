@@ -19,16 +19,17 @@ import {
   type Session,
   type Settings,
   type SkillEvent,
-  type Snapshot,
   type Store,
+  type UndoStep,
   type View,
 } from "../model.ts";
 import { finalScoreIssue, isFinalScore } from "./scoring.ts";
-import { learnFromRound } from "./skill.ts";
+import { applyPatch, diffValue } from "./undo.ts";
 import {
   applyRound,
-  assignmentKey,
   emptyLedger,
+  lineupKey,
+  matchIsShort,
   newSched,
   planRound,
   type EnginePlayer,
@@ -37,6 +38,9 @@ import {
   type RoundPlan,
   type SchedState,
 } from "./pairing.ts";
+
+/** Pending rounds kept ready ahead of the one on court. Finish tops this back up. */
+export const UPCOMING_BUFFER = 8;
 
 export interface StepResult {
   store: Store;
@@ -47,8 +51,8 @@ export interface StepResult {
 
 export type Action =
   | { type: "nav"; view: View }
-  | { type: "add-player"; name: string; gender: Player["gender"]; skill: number; arriveAfter: boolean }
-  | { type: "update-player"; playerId: string; name: string; gender: Player["gender"]; skill: number }
+  | { type: "add-player"; name: string; skill: number; arriveAfter: boolean }
+  | { type: "update-player"; playerId: string; name: string; skill: number }
   | { type: "delete-player"; playerId: string }
   | { type: "load-sample"; players: Player[] }
   | { type: "toggle-checkin"; playerId: string }
@@ -91,19 +95,17 @@ export function activeRound(session: Session): Round | null {
 }
 
 /**
- * Edits made while the round now on court was already the open round.
- * Check-in, the session start, and the previous round stay on the undo stack,
- * but they do not add to this count. Finishing a round or opening the next
- * one drops the count back to zero. The button can still undo that boundary.
+ * Edits made while this round is the one on court.
+ * Starting a session, finishing a round, and ending a session clear the stack.
+ * The button stays disabled until the current round has an edit.
  */
 export function roundUndoCount(store: Store): number {
   const roundNumber = store.active ? (activeRound(store.active)?.number ?? null) : null;
-  if (roundNumber === null) return 0;
+  if (!store.active || roundNumber === null) return 0;
   let count = 0;
   for (let index = store.undo.length - 1; index >= 0; index -= 1) {
-    const snap = store.undo[index];
-    const snapRound = snap?.active ? (activeRound(snap.active)?.number ?? null) : null;
-    if (snapRound !== roundNumber) break;
+    const step = store.undo[index];
+    if (step?.round !== roundNumber) break;
     count += 1;
   }
   return count;
@@ -116,7 +118,7 @@ export function presentIds(session: Session): string[] {
 function enginePlayers(players: readonly Player[], ids: Set<string>): EnginePlayer[] {
   return players
     .filter((player) => ids.has(player.id))
-    .map((player) => ({ id: player.id, gender: player.gender, skill: player.skill }));
+    .map((player) => ({ id: player.id, skill: player.skill }));
 }
 
 function eligiblePlayers(session: Session, players: readonly Player[], roundNumber: number): EnginePlayer[] {
@@ -172,6 +174,7 @@ function fromPlan(plan: RoundPlan, status: Round["status"]): Round {
       teamB: [...match.teamB] as [string, string],
       scoreA: 0,
       scoreB: 0,
+      short: match.short === true,
     })),
   };
 }
@@ -182,7 +185,7 @@ function planFrom(
   startNumber: number,
   count: number,
   variety = 0,
-  avoid?: ReadonlyMap<number, string>,
+  avoid?: ReadonlyMap<number, readonly string[]>,
 ): RoundPlan[] {
   let { sched, ledger } = recompute(session, startNumber - 1);
   const plans: RoundPlan[] = [];
@@ -191,7 +194,7 @@ function planFrom(
     const eligible = eligiblePlayers(session, players, roundNumber);
     const plan = planRound(eligible, sched, ledger, session.rules.courts, roundNumber, session.salt, {
       variety,
-      avoidKey: avoid?.get(roundNumber) ?? "",
+      avoidKeys: avoid?.get(roundNumber) ?? [],
     });
     plans.push(plan);
     const applied = applyRound(sched, ledger, plan);
@@ -206,7 +209,7 @@ function matchKey(match: { teamA: [string, string]; teamB: [string, string]; cou
 }
 
 export function roundLineupKey(round: Round): string {
-  return assignmentKey(round.matches.map(matchKey));
+  return lineupKey(round.matches.map(matchKey), round.sittingOut);
 }
 
 function hasScores(round: Round): boolean {
@@ -222,16 +225,19 @@ function replaceSession(store: Store, session: Session, view: View = store.view)
   return { ...store, active: session, view };
 }
 
-function takeSnapshot(store: Store, includePast: boolean): Snapshot {
-  return {
-    players: structuredClone(store.players),
-    settings: structuredClone(store.settings),
-    checkedIn: [...store.checkedIn],
-    active: structuredClone(store.active),
-    skillLog: structuredClone(store.skillLog),
-    view: structuredClone(store.view),
-    ...(includePast ? { past: structuredClone(store.past) } : {}),
-  };
+function roundOf(store: Store): number | null {
+  if (!store.active) return null;
+  return activeRound(store.active)?.number ?? null;
+}
+
+function sameUndoRound(before: Store, after: Store): boolean {
+  if (!!before.active !== !!after.active) return false;
+  return roundOf(before) === roundOf(after);
+}
+
+function storeBody(store: Store): unknown {
+  const { undo: _undo, ...rest } = store;
+  return rest;
 }
 
 function commit(
@@ -239,7 +245,13 @@ function commit(
   next: Store,
   extra?: { includePast?: boolean; cue?: boolean; notice?: string },
 ): StepResult {
-  const undo = [...store.undo, takeSnapshot(store, extra?.includePast ?? false)].slice(-UNDO_LIMIT);
+  if (!sameUndoRound(store, next)) {
+    return { store: { ...next, undo: [] }, cue: extra?.cue, notice: extra?.notice };
+  }
+  const patch = diffValue(storeBody(store), storeBody(next));
+  if (!patch) return { store: { ...next, undo: store.undo }, cue: extra?.cue, notice: extra?.notice };
+  const step: UndoStep = { round: roundOf(next), patch };
+  const undo = [...store.undo, step].slice(-UNDO_LIMIT);
   return { store: { ...next, undo }, cue: extra?.cue, notice: extra?.notice };
 }
 
@@ -293,13 +305,28 @@ function firstDroppedIndex(session: Session): number {
   return session.rounds.findIndex((round) => round.status !== "complete" && !hasScores(round));
 }
 
+function rememberRounds(session: Session): Session {
+  const memory: Record<string, string[]> = { ...(session.lineupMemory ?? {}) };
+  let changed = false;
+  for (const round of session.rounds) {
+    if (round.status === "complete") continue;
+    const key = roundLineupKey(round);
+    const bucket = memory[String(round.number)] ?? [];
+    if (bucket.includes(key)) continue;
+    memory[String(round.number)] = [...bucket, key].slice(-30);
+    changed = true;
+  }
+  if (!changed) return session;
+  return { ...session, lineupMemory: memory };
+}
+
 function reshuffleUnlocked(
   session: Session,
   players: readonly Player[],
   at: number,
   reason: string,
   variety = 0,
-  avoid?: ReadonlyMap<number, string>,
+  avoid?: ReadonlyMap<number, readonly string[]>,
 ): Session {
   const dropAt = firstDroppedIndex(session);
   if (dropAt === -1) return appendLog(session, at, reason);
@@ -311,14 +338,24 @@ function reshuffleUnlocked(
   const plans = planFrom(draft, players, startNumber, dropped, variety, avoid);
   const added = plans.map((plan, index) => fromPlan(plan, activeDropped && index === 0 ? "active" : "pending"));
   const rounds = [...kept, ...added];
-  return appendLog(
-    { ...session, rounds },
-    at,
-    `${reason} Rebuilt ${dropped} unplayed round${dropped === 1 ? "" : "s"}.`,
+  return rememberRounds(
+    appendLog(
+      { ...session, rounds },
+      at,
+      `${reason} Rebuilt ${dropped} unplayed round${dropped === 1 ? "" : "s"}.`,
+    ),
   );
 }
 
-function reshuffleAfter(session: Session, players: readonly Player[], afterNumber: number, at: number, reason: string): Session {
+function reshuffleAfter(
+  session: Session,
+  players: readonly Player[],
+  afterNumber: number,
+  at: number,
+  reason: string,
+  variety = 0,
+  avoid?: ReadonlyMap<number, readonly string[]>,
+): Session {
   const cut = session.rounds.findIndex(
     (round) => round.number > afterNumber && round.status !== "complete" && !hasScores(round),
   );
@@ -327,12 +364,14 @@ function reshuffleAfter(session: Session, players: readonly Player[], afterNumbe
   const dropped = session.rounds.length - kept.length;
   const startNumber = (kept[kept.length - 1]?.number ?? afterNumber) + 1;
   const draft = { ...session, rounds: kept };
-  const plans = planFrom(draft, players, startNumber, dropped);
+  const plans = planFrom(draft, players, startNumber, dropped, variety, avoid);
   const added = plans.map((plan) => fromPlan(plan, "pending"));
-  return appendLog(
-    { ...draft, rounds: [...kept, ...added] },
-    at,
-    `${reason} Rebuilt ${dropped} later round${dropped === 1 ? "" : "s"}.`,
+  return rememberRounds(
+    appendLog(
+      { ...draft, rounds: [...kept, ...added] },
+      at,
+      `${reason} Rebuilt ${dropped} later round${dropped === 1 ? "" : "s"}.`,
+    ),
   );
 }
 
@@ -348,12 +387,31 @@ function addRound(session: Session, players: readonly Player[], at: number, reas
   const [plan] = planFrom(session, players, start, 1);
   if (!plan) return session;
   const hasActive = session.rounds.some((round) => round.status === "active");
+  if (plan.matches.length === 0) return session;
   const round = fromPlan(plan, hasActive ? "pending" : "active");
-  return appendLog(
-    { ...session, rounds: [...session.rounds, round] },
-    at,
-    `${reason} Added round ${round.number}.`,
+  return rememberRounds(
+    appendLog(
+      { ...session, rounds: [...session.rounds, round] },
+      at,
+      `${reason} Added round ${round.number}.`,
+    ),
   );
+}
+
+function pendingCount(session: Session): number {
+  return session.rounds.filter((round) => round.status === "pending").length;
+}
+
+function topUp(session: Session, players: readonly Player[], at: number): Session {
+  let next = session;
+  let added = 0;
+  while (pendingCount(next) < UPCOMING_BUFFER && added < UPCOMING_BUFFER + 2) {
+    const before = next.rounds.length;
+    next = addRound(next, players, at, "Kept the next rounds ready.");
+    if (next.rounds.length === before) break;
+    added += 1;
+  }
+  return next;
 }
 
 function describeRound(players: readonly Player[], round: Round, withScore: boolean): string {
@@ -387,6 +445,17 @@ function swapIds(round: Round, outId: string, inId: string): Round {
   const nowPlaying = new Set(matches.flatMap((match) => [...match.teamA, ...match.teamB]));
   sittingOut = [...new Set(sittingOut.filter((id) => !nowPlaying.has(id)))].sort();
   return { ...round, matches, sittingOut };
+}
+
+function flagShort(round: Round, players: readonly Player[]): Round {
+  const skillOf = (id: string) => players.find((player) => player.id === id)?.skill ?? 0;
+  return {
+    ...round,
+    matches: round.matches.map((match) => ({
+      ...match,
+      short: matchIsShort(skillOf, match.teamA, match.teamB),
+    })),
+  };
 }
 
 function updateScore(session: Session, matchId: string, side: "A" | "B", score: number): Session | null {
@@ -527,22 +596,22 @@ export function reduce(store: Store, action: Action, now = Date.now()): StepResu
 }
 
 function undo(store: Store): StepResult {
-  const snap = store.undo[store.undo.length - 1];
-  if (!snap) return fail(store, "Nothing to undo.");
-  const restored: Store = {
-    ...store,
-    players: snap.players,
-    settings: snap.settings,
-    checkedIn: snap.checkedIn,
-    active: snap.active,
-    past: snap.past ?? store.past,
-    skillLog: snap.skillLog ?? store.skillLog,
-    view: store.view,
-    undo: store.undo.slice(0, -1),
-  };
-  if (restored.active && !store.active) restored.view = { name: "play" };
-  if (!restored.active && store.view.name === "play") restored.view = { name: "checkin" };
-  return { store: fixView(restored), notice: "Undid the last change." };
+  const round = roundOf(store);
+  const step = store.undo[store.undo.length - 1];
+  if (!step || step.round !== round) return fail(store, "Nothing to undo.");
+  if (store.active && round === null) return fail(store, "Nothing to undo.");
+  try {
+    const { undo: _undo, ...rest } = store;
+    const restoredRest = applyPatch(rest, step.patch as Parameters<typeof applyPatch>[1]);
+    if (!restoredRest || typeof restoredRest !== "object") return fail(store, "Couldn't undo that change.");
+    const restored = restoredRest as Omit<Store, "undo">;
+    return {
+      store: fixView({ ...restored, undo: store.undo.slice(0, -1) }),
+      notice: "Undid the last change.",
+    };
+  } catch {
+    return fail(store, "Couldn't undo that change.");
+  }
 }
 
 function addPlayer(
@@ -555,7 +624,6 @@ function addPlayer(
   const player: Player = {
     id: newId(),
     name,
-    gender: action.gender,
     skill: clampSkill(action.skill),
     createdAt: now,
   };
@@ -583,7 +651,7 @@ function updatePlayer(
   if (!existing) return fail(store, "That player is no longer in Players.");
   const nextSkill = Math.abs(existing.skill - action.skill) < 0.0005 ? existing.skill : clampSkill(action.skill);
   const players = store.players.map((player) =>
-    player.id === action.playerId ? { ...player, name, gender: action.gender, skill: nextSkill } : player,
+    player.id === action.playerId ? { ...player, name, skill: nextSkill } : player,
   );
   let skillLog = store.skillLog;
   if (existing.skill !== nextSkill) {
@@ -596,7 +664,7 @@ function updatePlayer(
   const session = store.active;
   const inSession = session?.attendance.some((att) => att.playerId === action.playerId && att.leftAtRound === null);
   if (session && inSession) {
-    const skillChanged = existing.skill !== nextSkill || existing.gender !== action.gender;
+    const skillChanged = existing.skill !== nextSkill;
     const updated = skillChanged ? reshuffleUnlocked({ ...session }, players, now, `Updated ${name}.`) : session;
     next = { ...next, active: updated, view: { name: "play" } };
   }
@@ -694,10 +762,12 @@ function startSession(store: Store, now: number): StepResult {
   };
   const plans = planFrom(session, store.players, 1, settings.initialRounds);
   const rounds = plans.map((plan, index) => fromPlan(plan, index === 0 ? "active" : "pending"));
-  const withRounds = appendLog(
-    { ...session, rounds },
-    now,
-    `Started with ${present.length} players on ${session.rules.courts} court${session.rules.courts === 1 ? "" : "s"}. ${describeRound(store.players, rounds[0] ?? fromPlan(plans[0]!, "active"), false)}`,
+  const withRounds = rememberRounds(
+    appendLog(
+      { ...session, rounds },
+      now,
+      `Started with ${present.length} players on ${session.rules.courts} court${session.rules.courts === 1 ? "" : "s"}. ${describeRound(store.players, rounds[0] ?? fromPlan(plans[0]!, "active"), false)}`,
+    ),
   );
   return commit(
     store,
@@ -776,7 +846,9 @@ function swap(store: Store, action: Extract<Action, { type: "swap" }>, now: numb
   }
   let draft: Session = { ...session, attendance };
   if (!alreadyHere) draft = floorSchedule(draft, action.inId, round.number - 1);
-  const rounds = draft.rounds.map((item) => (item.id === round.id ? swapIds(item, action.outId, action.inId) : item));
+  const rounds = draft.rounds.map((item) =>
+    item.id === round.id ? flagShort(swapIds(item, action.outId, action.inId), store.players) : item,
+  );
   draft = { ...draft, rounds };
   draft = reshuffleAfter(draft, store.players, round.number, now, `${incoming.name} in for ${outgoing.name}.`);
   return commit(store, replaceSession(store, draft), {
@@ -791,43 +863,130 @@ function hashVariety(salt: number, at: number, attempt: number): number {
   return hash || attempt + 1;
 }
 
+function avoidShown(session: Session): Map<number, string[]> {
+  const avoid = new Map<number, string[]>();
+  for (const [number, keys] of Object.entries(session.lineupMemory ?? {})) {
+    avoid.set(Number(number), [...keys]);
+  }
+  for (const round of session.rounds) {
+    if (round.status === "complete") continue;
+    const list = new Set(avoid.get(round.number) ?? []);
+    list.add(roundLineupKey(round));
+    avoid.set(round.number, [...list]);
+  }
+  return avoid;
+}
+
+function lineupsChanged(before: Session, after: Session): boolean {
+  const prior = new Map(before.rounds.map((round) => [round.number, roundLineupKey(round)]));
+  return after.rounds.some((round) => round.status !== "complete" && prior.get(round.number) !== roundLineupKey(round));
+}
+
+function assembleRound(current: Round, locked: readonly Match[], plan: RoundPlan): Round {
+  const used = new Set(locked.map((match) => match.court));
+  const fresh = plan.matches.map((match) => {
+    let court = 1;
+    while (used.has(court)) court += 1;
+    used.add(court);
+    return {
+      id: newId(),
+      court,
+      teamA: [...match.teamA] as [string, string],
+      teamB: [...match.teamB] as [string, string],
+      scoreA: 0,
+      scoreB: 0,
+      short: match.short === true,
+    };
+  });
+  return {
+    ...current,
+    matches: [...locked, ...fresh].sort((a, b) => a.court - b.court),
+    sittingOut: [...plan.sittingOut],
+  };
+}
+
+function remixOpenCourts(
+  session: Session,
+  players: readonly Player[],
+  at: number,
+  variety: number,
+  avoid: Map<number, string[]>,
+  current: Round,
+  locked: readonly Match[],
+): Session {
+  const lockedIds = new Set(locked.flatMap((match) => [...match.teamA, ...match.teamB]));
+  const { sched, ledger } = recompute(session, current.number - 1);
+  const eligible = eligiblePlayers(session, players, current.number).filter((player) => !lockedIds.has(player.id));
+  const courtsLeft = Math.max(0, session.rules.courts - locked.length);
+  const seen = new Set(avoid.get(current.number) ?? []);
+  const avoided = [...seen];
+  let updated = assembleRound(
+    current,
+    locked,
+    planRound(eligible, sched, ledger, courtsLeft, current.number, session.salt, { variety, avoidKeys: avoided }),
+  );
+  const big = eligible.length > 12 || courtsLeft > 2;
+  const tries = big ? 1 : 6;
+  for (let extra = 1; extra < tries && seen.has(roundLineupKey(updated)); extra += 1) {
+    const twist = hashVariety(session.salt, variety, extra + 20);
+    const nextRound = assembleRound(
+      current,
+      locked,
+      planRound(eligible, sched, ledger, courtsLeft, current.number, session.salt, { variety: twist, avoidKeys: avoided }),
+    );
+    updated = nextRound;
+    if (!seen.has(roundLineupKey(nextRound))) break;
+  }
+  const kept = session.rounds.filter((round) => round.number < current.number).concat(updated);
+  const later = session.rounds.filter((round) => round.number > current.number);
+  const draft: Session = { ...session, rounds: kept };
+  const plans = planFrom(draft, players, current.number + 1, later.length, variety, avoid);
+  const added = plans.map((plan) => fromPlan(plan, "pending"));
+  return rememberRounds(
+    appendLog(
+      { ...session, rounds: [...kept, ...added] },
+      at,
+      "Reshuffled. Scored courts stayed put.",
+    ),
+  );
+}
+
 function reshuffle(store: Store, now: number): StepResult {
   const session = requireSession(store);
   if (!session) return fail(store, "There's no live session.");
-  if (firstDroppedIndex(session) === -1) return fail(store, "Every round already has a score. Add a round instead.");
+  if (!session.rounds.some((round) => round.status !== "complete")) {
+    return fail(store, "Every round already has a score. Add a round instead.");
+  }
   const current = activeRound(session);
-  const started = !!current && hasScores(current);
-  const avoid = new Map<number, string>();
-  for (const round of session.rounds) {
-    if (round.status === "complete" || hasScores(round)) continue;
-    avoid.set(round.number, roundLineupKey(round));
-  }
+  const locked = current ? current.matches.filter((match) => match.scoreA > 0 || match.scoreB > 0) : [];
+  const fullyLocked = !!current && current.matches.length > 0 && locked.length === current.matches.length;
+  const big = presentIds(session).length > 12 || session.rules.courts > 2;
+  const tries = big ? 1 : 8;
+  const avoid = avoidShown(session);
   let next = session;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < tries; attempt += 1) {
     const variety = hashVariety(session.salt, now, attempt);
-    next = reshuffleUnlocked(
-      session,
-      store.players,
-      now,
-      started ? "Reshuffled the later rounds." : "Reshuffled.",
-      variety,
-      avoid,
-    );
-    const changed = next.rounds.some((round) => {
-      const previous = avoid.get(round.number);
-      return previous !== undefined && roundLineupKey(round) !== previous;
-    });
-    if (changed || avoid.size === 0) break;
+    if (!current || locked.length === current.matches.length) {
+      next = current && fullyLocked
+        ? reshuffleAfter(session, store.players, current.number, now, "Reshuffled the later rounds.", variety, avoid)
+        : reshuffleUnlocked(session, store.players, now, "Reshuffled.", variety, avoid);
+    } else {
+      next = remixOpenCourts(session, store.players, now, variety, avoid, current, locked);
+    }
+    if (lineupsChanged(session, next) || tries === 1) break;
   }
-  return commit(store, replaceSession(store, next), {
-    notice: started ? "Later rounds reshuffled." : "Open rounds reshuffled.",
-  });
+  const notice = !current || locked.length === 0
+    ? "Open rounds reshuffled."
+    : fullyLocked
+      ? "Later rounds reshuffled."
+      : "Scored courts stayed. The rest reshuffled.";
+  return commit(store, replaceSession(store, next), { notice });
 }
 
 function addRounds(store: Store, count: number, now: number): StepResult {
   const session = requireSession(store);
   if (!session) return fail(store, "There's no live session.");
-  const rounds = clampInt(count, 1, 6);
+  const rounds = clampInt(count, 1, 100);
   let next = session;
   const hadActive = session.rounds.some((round) => round.status === "active");
   for (let index = 0; index < rounds; index += 1) {
@@ -913,14 +1072,12 @@ function finishRound(store: Store, now: number): StepResult {
   }
   const finished = rounds[finishedIndex] ?? round;
   let next = appendLog({ ...session, rounds }, now, describeRound(store.players, { ...finished, status: "complete" }, true));
-  if (rounds.some((item) => item.status === "active")) {
-    const upcoming = rounds.find((item) => item.status === "active");
-    if (upcoming) next = appendLog(next, now, `Round ${upcoming.number} is up. ${describeRound(store.players, upcoming, false)}`);
-  }
-  const learned = learnFromRound(store.players, { ...finished, status: "complete" }, now, store.skillLog);
-  return commit(store, replaceSession({ ...store, players: learned.players, skillLog: learned.skillLog }, next), {
-    cue: rounds.some((item) => item.status === "active"),
-    notice: rounds.some((item) => item.status === "active") ? "Next round is up." : "Planned rounds are done. Tap Next round to keep going.",
+  next = topUp(next, store.players, now);
+  const live = next.rounds.find((item) => item.status === "active");
+  if (live) next = appendLog(next, now, `Round ${live.number} is up. ${describeRound(store.players, live, false)}`);
+  return commit(store, replaceSession(store, next), {
+    cue: !!live,
+    notice: live ? "Next round is up." : "Planned rounds are done. Tap Next round to keep going.",
   });
 }
 

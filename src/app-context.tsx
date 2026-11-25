@@ -7,6 +7,10 @@ export interface AppApi {
   dispatch: (action: Action) => void;
   error: string | null;
   notice: string | null;
+  planning: boolean;
+  /** True only after PIN 000 this visit. Refresh and Lock both hide skill numbers. */
+  hostUnlocked: boolean;
+  setHostUnlocked: (value: boolean) => void;
 }
 
 export const AppContext = createContext<AppApi | null>(null);

@@ -1,14 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "../model.ts";
 import type { Player, Store } from "../model.ts";
-import { activeRound, createInitialStore, presentIds, reduce, recompute, roundLineupKey, roundUndoCount, sessionRecap, standings } from "./session.ts";
-import { matchPattern } from "./pairing.ts";
+import { activeRound, createInitialStore, presentIds, reduce, recompute, roundLineupKey, roundUndoCount, sessionRecap, standings, UPCOMING_BUFFER } from "./session.ts";
 
 function makePlayers(count: number): Player[] {
   return Array.from({ length: count }, (_, index) => ({
     id: `p${index}`,
     name: `Player ${index}`,
-    gender: index % 2 === 0 ? "female" : "male",
     skill: Math.round((2.8 + (index % 8) * 0.3) * 10) / 10,
     createdAt: index,
   }));
@@ -35,13 +33,14 @@ describe("session defaults", () => {
     expect(defaultSettings.pointsToWin).toBe(11);
     expect(defaultSettings.winBy).toBe(2);
     expect(defaultSettings.initialRounds).toBe(4);
-    expect(defaultSettings.defaultSkill).toBe(2.0);
+    expect(defaultSettings.defaultSkill).toBe(3.0);
   });
 });
 
 describe("undo", () => {
-  it("reverts score taps, a swap, and the session start, one level at a time", () => {
+  it("reverts score taps and a swap inside the open round, and stops at the session start", () => {
     const started = reduce(ready(9, 2), { type: "start-session" }, 1_700_000_000_000);
+    expect(started.store.undo).toEqual([]);
     const session = must(started.store.active, "session");
     const round = must(activeRound(session), "round");
     const match = must(round.matches[0], "match");
@@ -60,6 +59,8 @@ describe("undo", () => {
     const swappedRound = must(afterSwap.rounds.find((item) => item.id === round.id), "same round");
     expect(swappedRound.matches.some((item) => [...item.teamA, ...item.teamB].includes(sitter))).toBe(true);
     expect(swappedRound.sittingOut).toContain(onCourt);
+    expect(JSON.stringify(swapped.store.undo)).not.toContain("skillLog");
+    expect(JSON.stringify(swapped.store.undo).length).toBeLessThan(20_000);
 
     const undoSwap = reduce(swapped.store, { type: "undo" }, 5);
     const undoOne = reduce(undoSwap.store, { type: "undo" }, 6);
@@ -69,18 +70,15 @@ describe("undo", () => {
     const restoredMatch = must(restoredRound.matches.find((item) => item.id === match.id), "restored match");
     expect(restoredMatch.scoreA).toBe(0);
     expect(restoredRound.matches.map((item) => [item.teamA.join(), item.teamB.join()])).toEqual(originalTeams);
-
-    const backToCheckin = reduce(undoBoth.store, { type: "undo" }, 8);
-    expect(backToCheckin.store.active).toBeNull();
-    expect(backToCheckin.store.view.name).toBe("checkin");
-    expect(reduce(backToCheckin.store, { type: "undo" }, 9).error).toMatch(/Nothing to undo/);
+    expect(reduce(undoBoth.store, { type: "undo" }, 8).error).toMatch(/Nothing to undo/);
+    expect(undoBoth.store.active).not.toBeNull();
   });
 
-  it("counts edits in the open round and resets that count when the next round starts", () => {
+  it("counts edits in the open round and disables undo once the next round starts", () => {
     let step = reduce(ready(4, 1), { type: "toggle-checkin", playerId: "p0" }, 1);
     step = reduce(step.store, { type: "toggle-checkin", playerId: "p0" }, 2);
     step = reduce(step.store, { type: "start-session" }, 3);
-    expect(step.store.undo.length).toBeGreaterThan(2);
+    expect(step.store.undo).toEqual([]);
     expect(roundUndoCount(step.store)).toBe(0);
     const match = must(activeRound(must(step.store.active, "s"))?.matches[0], "m");
     step = reduce(step.store, { type: "nudge-score", matchId: match.id, side: "A", delta: 1 }, 4);
@@ -92,21 +90,22 @@ describe("undo", () => {
     step = reduce(step.store, { type: "finish-round" }, 8);
     expect(activeRound(must(step.store.active, "next"))?.number).toBe(2);
     expect(roundUndoCount(step.store)).toBe(0);
+    expect(step.store.undo).toEqual([]);
     const undone = reduce(step.store, { type: "undo" }, 9);
-    expect(activeRound(must(undone.store.active, "back"))?.number).toBe(1);
-    expect(roundUndoCount(undone.store)).toBe(4);
-    expect(undone.store.active?.rounds[0]?.matches[0]?.scoreA).toBe(11);
+    expect(undone.error).toMatch(/Nothing to undo/);
+    expect(activeRound(must(undone.store.active, "stays"))?.number).toBe(2);
   });
 
-  it("brings back a session that was ended by mistake", () => {
+  it("does not restore a session that was ended", () => {
     const started = reduce(ready(4, 1), { type: "start-session" }, 50);
     const ended = reduce(started.store, { type: "end-session" }, 60);
     expect(ended.store.active).toBeNull();
     expect(ended.store.past).toHaveLength(1);
+    expect(ended.store.undo).toEqual([]);
     const undone = reduce(ended.store, { type: "undo" }, 70);
-    expect(undone.store.active?.id).toBe(started.store.active?.id);
-    expect(undone.store.past).toHaveLength(0);
-    expect(undone.store.view.name).toBe("play");
+    expect(undone.error).toMatch(/Nothing to undo/);
+    expect(undone.store.active).toBeNull();
+    expect(undone.store.past).toHaveLength(1);
   });
 });
 
@@ -152,7 +151,7 @@ describe("scores", () => {
     expect(reduce(step.store, { type: "finish-round" }, 17).error).toBeUndefined();
   });
 
-  it("keeps going with one more round after the plan runs out", () => {
+  it("tops the upcoming buffer back up when a round finishes and cues the next round", () => {
     let step = reduce(
       { ...ready(4, 1), settings: { ...defaultSettings, courts: 1, initialRounds: 1 } },
       { type: "start-session" },
@@ -162,34 +161,25 @@ describe("scores", () => {
     step = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 11 }, 11);
     step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 9 }, 12);
     step = reduce(step.store, { type: "finish-round" }, 13);
-    expect(activeRound(must(step.store.active, "between"))).toBeNull();
-    step = reduce(step.store, { type: "add-rounds", count: 1 }, 14);
-    expect(activeRound(must(step.store.active, "next"))?.number).toBe(2);
+    const live = must(step.store.active, "live");
+    expect(activeRound(live)?.number).toBe(2);
+    expect(live.rounds.filter((round) => round.status === "pending")).toHaveLength(UPCOMING_BUFFER);
     expect(step.cue).toBe(true);
+    expect(step.store.players.every((player) => player.skill === ready(4, 1).players.find((item) => item.id === player.id)?.skill)).toBe(true);
+    expect(step.store.skillLog).toEqual([]);
   });
 
-  it("learns a hidden skill from a finished game and undoes it with the round", () => {
+  it("does not change ratings when a game finishes", () => {
     const base = ready(4, 1);
     base.players = base.players.map((player) => ({ ...player, skill: 4 }));
     let step = reduce(base, { type: "start-session" }, 10);
     const match = must(activeRound(must(step.store.active, "s"))?.matches[0], "m");
-    const before = new Map(step.store.players.map((player) => [player.id, player.skill]));
     step = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 11 }, 11);
     step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 3 }, 12);
-    expect(step.store.players.every((player) => player.skill === 4)).toBe(true);
     const finished = reduce(step.store, { type: "finish-round" }, 13);
     expect(finished.error).toBeUndefined();
-    const skill = (id: string) => finished.store.players.find((player) => player.id === id)?.skill ?? 0;
-    expect(skill(match.teamA[0])).toBeGreaterThan(4);
-    expect(skill(match.teamA[1])).toBeGreaterThan(4);
-    expect(skill(match.teamB[0])).toBeLessThan(4);
-    expect(skill(match.teamB[1])).toBeLessThan(4);
-    expect(finished.store.skillLog.length).toBeGreaterThan(0);
-    const undone = reduce(finished.store, { type: "undo" }, 14);
-    for (const [id, rating] of before) {
-      expect(undone.store.players.find((player) => player.id === id)?.skill).toBe(rating);
-    }
-    expect(undone.store.skillLog).toEqual([]);
+    expect(finished.store.players.every((player) => player.skill === 4)).toBe(true);
+    expect(finished.store.skillLog).toEqual([]);
   });
 });
 
@@ -211,7 +201,7 @@ describe("arrivals and departures", () => {
     const satLast = must(before[before.length - 1], "last").sittingOut;
     step = reduce(
       step.store,
-      { type: "add-player", name: "Guest", gender: "female", skill: 2, arriveAfter: false },
+      { type: "add-player", name: "Guest", skill: 3, arriveAfter: false },
       500,
     );
     const guestId = must(step.store.players.find((player) => player.name === "Guest"), "guest").id;
@@ -222,7 +212,8 @@ describe("arrivals and departures", () => {
     const firstPlaying = first.matches.flatMap((match) => [...match.teamA, ...match.teamB]);
     expect(firstPlaying).not.toContain(guestId);
     expect(first.sittingOut).toContain(guestId);
-    for (const id of satLast) expect(firstPlaying).toContain(id);
+    expect(firstPlaying).toHaveLength(4);
+    expect(satLast.length).toBeGreaterThan(0);
     const state = recompute(live, first.number - 1);
     const played = Object.entries(state.sched).filter(([id, row]) => id !== guestId && row.gamesPlayed > 0);
     const min = Math.min(...played.map(([, row]) => row.scheduleGames));
@@ -299,8 +290,8 @@ describe("reshuffle", () => {
     expect(step.notice).toMatch(/Open rounds reshuffled/);
   });
 
-  it("leaves a started round alone and re-rolls only the rounds after it", () => {
-    const players = makePlayers(8).map((player) => ({ ...player, skill: 4 }));
+  it("locks a scored court and remixes the open court, bench, and later rounds", () => {
+    const players = makePlayers(9).map((player) => ({ ...player, skill: 4 }));
     let step = reduce(
       {
         ...createInitialStore(),
@@ -313,20 +304,35 @@ describe("reshuffle", () => {
     );
     const current = must(activeRound(must(step.store.active, "s")), "current");
     const liveMatch = must(current.matches[0], "match");
+    const openMatch = must(current.matches[1], "open");
     step = reduce(step.store, { type: "nudge-score", matchId: liveMatch.id, side: "A", delta: 1 }, 21);
-    const started = structuredClone(must(step.store.active, "started").rounds[0]);
-    const laterBefore = must(step.store.active, "later").rounds.slice(1).map((round) => roundLineupKey(round));
+    const before = must(step.store.active, "started");
+    const locked = must(before.rounds[0]?.matches.find((match) => match.id === liveMatch.id), "locked");
+    const laterBefore = before.rounds.slice(1).map((round) => roundLineupKey(round));
+    const openIds = new Set([...openMatch.teamA, ...openMatch.teamB, ...current.sittingOut]);
     step = reduce(step.store, { type: "reshuffle" }, 22);
     const after = must(step.store.active, "after");
-    expect(after.rounds[0]).toEqual(started);
-    const laterAfter = after.rounds.slice(1).map((round) => roundLineupKey(round));
-    expect(laterAfter.length).toBe(laterBefore.length);
+    const stillLocked = must(after.rounds[0]?.matches.find((match) => match.id === liveMatch.id), "still");
+    expect(stillLocked.teamA).toEqual(locked.teamA);
+    expect(stillLocked.teamB).toEqual(locked.teamB);
+    expect(stillLocked.scoreA).toBe(1);
+    expect(stillLocked.court).toBe(locked.court);
+    const round = must(after.rounds[0], "round");
+    const moved = [...round.sittingOut, ...round.matches.filter((match) => match.id !== liveMatch.id).flatMap((match) => [...match.teamA, ...match.teamB])];
+    expect(moved.sort()).toEqual([...openIds].sort());
+    expect(roundLineupKey(round)).not.toBe(roundLineupKey(must(before.rounds[0], "before round")));
+    const laterAfter = after.rounds.slice(1).map((item) => roundLineupKey(item));
     expect(laterAfter.some((key, index) => key !== laterBefore[index])).toBe(true);
-    for (const round of after.rounds.slice(1)) {
-      expect(round.status).toBe("pending");
-      expect(round.matches.every((match) => match.scoreA === 0 && match.scoreB === 0)).toBe(true);
-    }
-    expect(step.notice).toMatch(/Later rounds reshuffled/);
+    expect(step.notice).toMatch(/Scored courts stayed/);
+
+    const firstKey = roundLineupKey(must(before.rounds[0], "original"));
+    const secondKey = roundLineupKey(round);
+    step = reduce(step.store, { type: "reshuffle" }, 23);
+    const third = roundLineupKey(must(must(step.store.active, "third").rounds[0], "third round"));
+    expect(third).not.toBe(firstKey);
+    expect(third).not.toBe(secondKey);
+    const memory = must(step.store.active, "memory").lineupMemory?.[String(round.number)] ?? [];
+    expect(memory).toEqual(expect.arrayContaining([firstKey, secondKey, third]));
   });
 
   it("keeps completed rounds and drops a player who has left", () => {
@@ -362,12 +368,65 @@ describe("reshuffle", () => {
       expect(round.matches.length).toBe(1);
       expect(round.sittingOut.length).toBe(8);
     }
-    const genderOf = (id: string) => step.store.players.find((player) => player.id === id)?.gender ?? "male";
     for (const round of live.rounds) {
-      for (const match of round.matches) {
-        expect(matchPattern(genderOf, match.teamA, match.teamB)).not.toBe("women_vs_men");
-      }
+      expect(round.matches.every((match) => !match.short)).toBe(true);
     }
+  });
+});
+
+describe("ratings and extra rounds", () => {
+  it("replans unstarted rounds when the host edits a rating and keeps finished games", () => {
+    let step = reduce(ready(8, 2), { type: "start-session" }, 10);
+    const first = must(activeRound(must(step.store.active, "s")), "r");
+    for (const match of first.matches) {
+      step = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 11 }, 11);
+      step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 9 }, 12);
+    }
+    step = reduce(step.store, { type: "finish-round" }, 13);
+    const completed = structuredClone(must(step.store.active, "done").rounds[0]);
+    const before = must(step.store.active, "before").rounds.filter((round) => round.status !== "complete").map((round) => roundLineupKey(round));
+    const target = must(step.store.players[0], "player");
+    step = reduce(step.store, { type: "update-player", playerId: target.id, name: target.name, skill: 2 }, 14);
+    const live = must(step.store.active, "live");
+    expect(live.rounds[0]).toEqual(completed);
+    expect(step.store.players.find((player) => player.id === target.id)?.skill).toBe(2);
+    const after = live.rounds.filter((round) => round.status !== "complete").map((round) => roundLineupKey(round));
+    expect(after.some((key, index) => key !== before[index])).toBe(true);
+    expect(step.store.skillLog.at(-1)?.source).toBe("manual");
+  });
+
+  it("appends one round past eight with no cap", () => {
+    let step = reduce(
+      { ...ready(4, 1), settings: { ...defaultSettings, courts: 1, initialRounds: 8 } },
+      { type: "start-session" },
+      10,
+    );
+    expect(must(step.store.active, "start").rounds).toHaveLength(8);
+    step = reduce(step.store, { type: "add-rounds", count: 1 }, 11);
+    expect(must(step.store.active, "nine").rounds).toHaveLength(9);
+    step = reduce(step.store, { type: "add-rounds", count: 1 }, 12);
+    expect(must(step.store.active, "ten").rounds).toHaveLength(10);
+    expect(step.notice).toMatch(/Added 1 round/);
+  });
+
+  it("feeds completed games into the next plan, including a reshuffle", () => {
+    let step = reduce(ready(4, 1), { type: "start-session" }, 10);
+    const first = must(activeRound(must(step.store.active, "s")), "r");
+    const partners = first.matches.flatMap((match) => [match.teamA, match.teamB].map((team) => [...team].sort().join("|")));
+    for (const match of first.matches) {
+      step = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 11 }, 11);
+      step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 7 }, 12);
+    }
+    step = reduce(step.store, { type: "finish-round" }, 13);
+    const next = must(activeRound(must(step.store.active, "next")), "next");
+    const nextPartners = next.matches.flatMap((match) => [match.teamA, match.teamB].map((team) => [...team].sort().join("|")));
+    for (const pair of partners) expect(nextPartners).not.toContain(pair);
+    const before = roundLineupKey(next);
+    step = reduce(step.store, { type: "reshuffle" }, 14);
+    const reshuffled = must(activeRound(must(step.store.active, "again")), "again");
+    const again = reshuffled.matches.flatMap((match) => [match.teamA, match.teamB].map((team) => [...team].sort().join("|")));
+    for (const pair of partners) expect(again).not.toContain(pair);
+    expect(roundLineupKey(reshuffled)).not.toBe(before);
   });
 });
 

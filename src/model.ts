@@ -1,13 +1,9 @@
-export type Gender = "female" | "male";
-
 export interface Player {
   id: string;
   name: string;
-  gender: Gender;
   /**
-   * Hidden skill used only for fair pairing. Learned from finished games and
-   * clamped from 2.0 to 5.5. Manual edits use 0.1 steps; learned values keep
-   * a little extra precision so small updates are not lost.
+   * Hidden skill used only for fair pairing. The host sets it, from 2.0 to 5.5
+   * in 0.1 steps. Finished games do not change it.
    */
   skill: number;
   createdAt: number;
@@ -22,7 +18,7 @@ export interface Settings {
   initialRounds: number;
   /** Hidden skill filled in for a new player. */
   defaultSkill: number;
-  /** Host-only. When false, skill numbers stay off every screen. */
+  /** Host-only preference. Numbers still stay hidden until the PIN unlocks this visit. */
   hostSkills: boolean;
   soundOn: boolean;
   vibrateOn: boolean;
@@ -35,6 +31,8 @@ export interface Match {
   teamB: [string, string];
   scoreA: number;
   scoreB: number;
+  /** True when this game was built below the 5.0 team-total floor. */
+  short?: boolean;
 }
 
 export interface Round {
@@ -84,6 +82,8 @@ export interface Session {
   paused?: boolean;
   rules: SessionRules;
   log: LogEntry[];
+  /** Lineup keys already shown for each round number. Reshuffle avoids all of them. */
+  lineupMemory?: Record<string, string[]>;
 }
 
 /** A quiet record of hidden-skill changes. Shown nowhere in the app. */
@@ -106,14 +106,11 @@ export type View =
   | { name: "past" }
   | { name: "settings" };
 
-export interface Snapshot {
-  players: Player[];
-  settings: Settings;
-  checkedIn: string[];
-  active: Session | null;
-  past?: Session[];
-  skillLog?: SkillEvent[];
-  view: View;
+/** One undo step. `patch` restores the previous store without copying untouched data. */
+export interface UndoStep {
+  /** Active round this edit belongs to. Null when no session is live. */
+  round: number | null;
+  patch: unknown;
 }
 
 export interface Store {
@@ -124,7 +121,7 @@ export interface Store {
   past: Session[];
   /** Hidden skill changes. Kept for backup, never rendered. */
   skillLog: SkillEvent[];
-  undo: Snapshot[];
+  undo: UndoStep[];
   view: View;
 }
 
@@ -141,7 +138,7 @@ export const defaultSettings: Settings = {
   pointsToWin: 11,
   winBy: 2,
   initialRounds: 4,
-  defaultSkill: 2.0,
+  defaultSkill: 3.0,
   hostSkills: false,
   soundOn: true,
   vibrateOn: true,
@@ -171,10 +168,6 @@ export function skillChoices(): number[] {
     values.push(tenths / 10);
   }
   return values;
-}
-
-export function genderMark(gender: Gender): "F" | "M" {
-  return gender === "female" ? "F" : "M";
 }
 
 export function clampInt(value: number, min: number, max: number): number {

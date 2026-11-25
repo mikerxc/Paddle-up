@@ -19,7 +19,6 @@ function players(count: number): Player[] {
   return Array.from({ length: count }, (_, index) => ({
     id: `p${index}`,
     name: `Player ${index}`,
-    gender: index % 2 === 0 ? "female" : "male",
     skill: 3.5,
     createdAt: index,
   }));
@@ -85,7 +84,9 @@ describe("storage", () => {
     );
     const loaded = loadStore(memory);
     expect(loaded.settings.hostSkills).toBe(false);
+    expect(loaded.settings.defaultSkill).toBe(3);
     expect(loaded.players[0]?.skill).toBe(3.2);
+    expect(loaded.players[0]).not.toHaveProperty("gender");
     expect(loaded.active?.id).toBe("s");
     expect(loaded.active?.paused).toBe(true);
     expect(loaded.skillLog).toEqual([]);
@@ -115,5 +116,58 @@ describe("storage", () => {
     expect(restored.store.players.map((player) => player.name)).toEqual(["Player 0", "Player 1"]);
     expect(restored.store.skillLog).toEqual(store.skillLog);
     expect(restored.store.view.name).toBe("home");
+  });
+
+  it("loads players with no gender and migrates the old 2.0 default once", () => {
+    const memory = new MemoryStorage();
+    memory.setItem(
+      "paddle-up-v1",
+      JSON.stringify({
+        version: 1,
+        players: [
+          { id: "a", name: "Ann", skill: 2, createdAt: 1 },
+          { id: "b", name: "Bo", gender: "nope", skill: 2.4, createdAt: 2 },
+          { id: "c", name: "Cy", gender: "female", skill: 3.1, createdAt: 3 },
+        ],
+        settings: { courts: 2, pointsToWin: 11, winBy: 2, initialRounds: 4, defaultSkill: 2, soundOn: true, vibrateOn: true },
+        checkedIn: [],
+        active: null,
+        past: [],
+        view: { name: "roster" },
+      }),
+    );
+    const loaded = loadStore(memory);
+    expect(loaded.players.map((player) => [player.name, player.skill])).toEqual([
+      ["Ann", 3],
+      ["Bo", 2.4],
+      ["Cy", 3.1],
+    ]);
+    expect(loaded.settings.defaultSkill).toBe(3);
+    expect(saveStore(loaded, memory)).toBe(true);
+    const edited = loadStore(memory);
+    edited.players = edited.players.map((player) => (player.id === "a" ? { ...player, skill: 2 } : player));
+    expect(saveStore(edited, memory)).toBe(true);
+    const again = loadStore(memory);
+    expect(again.players.find((player) => player.id === "a")?.skill).toBe(2);
+    expect(again.settings.defaultSkill).toBe(3);
+  });
+
+  it("accepts a backup whose players have no gender", () => {
+    const parsed = parseBackup({
+      kind: "paddle-up-backup",
+      version: 1,
+      exportedAt: 5,
+      players: [{ id: "a", name: "Ann", skill: 2, createdAt: 1 }],
+      settings: { ...defaultSettings, defaultSkill: 2 },
+      past: [],
+      active: null,
+      checkedIn: [],
+      skillLog: [],
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.backup.players[0]?.skill).toBe(3);
+    expect(parsed.backup.settings.defaultSkill).toBe(3);
+    expect(parsed.backup.skillDefaultMigrated).toBe(true);
   });
 });

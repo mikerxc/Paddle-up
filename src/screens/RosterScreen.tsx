@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { rosterPlayers } from "../engine/session.ts";
-import { genderMark, type Gender } from "../model.ts";
 import { useApp } from "../app-context.tsx";
 import { Screen, SkillStepper } from "../components/Bits.tsx";
 import { Button } from "../components/ui/button.tsx";
@@ -8,8 +7,9 @@ import { Input } from "../components/ui/input.tsx";
 import { samplePlayers } from "../sample.ts";
 
 export function RosterScreen() {
-  const { store, dispatch } = useApp();
+  const { store, dispatch, hostUnlocked } = useApp();
   const players = rosterPlayers(store);
+  const showSkill = hostUnlocked;
   return (
     <Screen title="Players" onBack={() => dispatch({ type: "nav", view: { name: "home" } })}>
       <Button size="lg" full data-testid="add-player" onClick={() => dispatch({ type: "nav", view: { name: "edit", playerId: null, arriveAfter: false } })}>
@@ -33,10 +33,11 @@ export function RosterScreen() {
                 onClick={() => dispatch({ type: "nav", view: { name: "edit", playerId: player.id, arriveAfter: false } })}
               >
                 <span className="text-lg font-black">{player.name}</span>
-                <span className="text-base font-bold">
-                  {genderMark(player.gender)}
-                  {store.settings.hostSkills ? ` · ${player.skill.toFixed(1)}` : ""}
-                </span>
+                {showSkill ? (
+                  <span className="text-base font-bold tabular-nums" data-testid={`skill-${player.id}`}>
+                    {player.skill.toFixed(1)}
+                  </span>
+                ) : null}
               </button>
             </li>
           ))}
@@ -47,14 +48,14 @@ export function RosterScreen() {
 }
 
 export function EditPlayerScreen() {
-  const { store, dispatch } = useApp();
+  const { store, dispatch, hostUnlocked } = useApp();
   const view = store.view.name === "edit" ? store.view : null;
   const existing = store.players.find((player) => player.id === view?.playerId);
   const [name, setName] = useState(existing?.name ?? "");
-  const [gender, setGender] = useState<Gender | null>(existing?.gender ?? null);
   const [skill, setSkill] = useState(existing?.skill ?? store.settings.defaultSkill);
   const [localError, setLocalError] = useState<string | null>(null);
   const inSession = !!existing && store.active?.attendance.some((att) => att.playerId === existing.id);
+  const showSkill = hostUnlocked;
 
   if (!view) return null;
 
@@ -67,15 +68,12 @@ export function EditPlayerScreen() {
         className="flex flex-col gap-3"
         onSubmit={(event) => {
           event.preventDefault();
-          if (!gender) {
-            setLocalError("Pick Female or Male.");
-            return;
-          }
           setLocalError(null);
+          const rating = showSkill ? skill : (existing?.skill ?? store.settings.defaultSkill);
           if (existing) {
-            dispatch({ type: "update-player", playerId: existing.id, name, gender, skill });
+            dispatch({ type: "update-player", playerId: existing.id, name, skill: rating });
           } else {
-            dispatch({ type: "add-player", name, gender, skill, arriveAfter: view.arriveAfter });
+            dispatch({ type: "add-player", name, skill: rating, arriveAfter: view.arriveAfter });
           }
         }}
       >
@@ -83,19 +81,10 @@ export function EditPlayerScreen() {
           Name
         </label>
         <Input id="player-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Name" autoComplete="name" data-testid="player-name" />
-        <p className="text-base font-black">Gender</p>
-        <div className="grid grid-cols-2 gap-2">
-          <Button type="button" size="lg" variant={gender === "female" ? "default" : "secondary"} data-testid="gender-female" onClick={() => setGender("female")}>
-            Female
-          </Button>
-          <Button type="button" size="lg" variant={gender === "male" ? "default" : "secondary"} data-testid="gender-male" onClick={() => setGender("male")}>
-            Male
-          </Button>
-        </div>
-        {store.settings.hostSkills && (
+        {showSkill && (
           <>
             <p className="text-base font-black">Hidden skill</p>
-            <p className="text-base font-semibold text-muted">Only visible with host controls on. Finished games keep learning from this number.</p>
+            <p className="text-base font-semibold text-muted">Only the host sees this. It changes when you edit it, not from game scores.</p>
             <SkillStepper value={skill} onChange={setSkill} />
           </>
         )}

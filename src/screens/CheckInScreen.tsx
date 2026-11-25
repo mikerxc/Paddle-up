@@ -1,5 +1,5 @@
 import { rosterPlayers } from "../engine/session.ts";
-import { genderMark, MAX_COURTS } from "../model.ts";
+import { MAX_COURTS } from "../model.ts";
 import { useApp } from "../app-context.tsx";
 import { Screen } from "../components/Bits.tsx";
 import { Button } from "../components/ui/button.tsx";
@@ -66,9 +66,7 @@ export function CheckInScreen() {
                   onClick={() => dispatch({ type: "toggle-checkin", playerId: player.id })}
                 >
                   <span className="text-lg font-black">{player.name}</span>
-                  <span className="text-base font-bold">
-                    {on ? "Here" : "Out"} · {genderMark(player.gender)}
-                  </span>
+                  <span className="text-base font-bold">{on ? "Here" : "Out"}</span>
                 </button>
               </li>
             );
