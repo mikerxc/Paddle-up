@@ -16,13 +16,20 @@ function tone(ctx: AudioContext, frequency: number, when: number, duration: numb
   const gain = ctx.createGain();
   osc.type = "sine";
   osc.frequency.value = frequency;
+  // One voice at a time, loud enough to carry outside, still under full scale.
   gain.gain.setValueAtTime(0.0001, when);
-  gain.gain.exponentialRampToValueAtTime(0.18, when + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.82, when + 0.012);
   gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
   osc.connect(gain);
   gain.connect(ctx.destination);
   osc.start(when);
   osc.stop(when + duration + 0.02);
+}
+
+/** Call from the first tap so iPhone will actually play the round chime. */
+export function unlockAudio() {
+  const ctx = context();
+  if (ctx && ctx.state === "suspended") void ctx.resume();
 }
 
 export function playRoundCue(settings: Pick<Settings, "soundOn">) {
@@ -31,6 +38,6 @@ export function playRoundCue(settings: Pick<Settings, "soundOn">) {
   if (!ctx) return;
   if (ctx.state === "suspended") void ctx.resume();
   const now = ctx.currentTime;
-  tone(ctx, 784, now, 0.12);
-  tone(ctx, 1046, now + 0.14, 0.18);
+  const notes = [523.25, 659.25, 783.99, 1046.5];
+  notes.forEach((frequency, index) => tone(ctx, frequency, now + index * 0.2, 0.18));
 }

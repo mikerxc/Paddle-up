@@ -434,6 +434,21 @@ describe("sit-out returners", () => {
   });
 });
 
+describe("no back-to-back sits", () => {
+  it("does not sit the same people two rounds in a row for groups of 10, 11, and 12", () => {
+    for (const count of [10, 11, 12]) {
+      const players = many(count).map((item) => ({ ...item, skill: 4 }));
+      const { plans } = simulate(players, 2, 20, 5);
+      for (let index = 1; index < plans.length; index += 1) {
+        const previous = new Set(plans[index - 1]?.sittingOut ?? []);
+        for (const id of plans[index]?.sittingOut ?? []) {
+          expect(previous.has(id), `${count} players round ${index + 1} sat ${id} again`).toBe(false);
+        }
+      }
+    }
+  });
+});
+
 describe("large draws", () => {
   it("fills four courts from ratings alone", () => {
     const players = many(16);

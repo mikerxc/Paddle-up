@@ -430,6 +430,83 @@ describe("ratings and extra rounds", () => {
   });
 });
 
+describe("time cap, breaks, and ending", () => {
+  it("counts a time-capped lead as a win and a tie as a game with no winner", () => {
+    let step = reduce(ready(4, 1), { type: "start-session" }, 10);
+    const match = must(activeRound(must(step.store.active, "s"))?.matches[0], "m");
+    step = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 7 }, 11);
+    step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 4 }, 12);
+    step = reduce(step.store, { type: "end-as-is", matchId: match.id }, 13);
+    step = reduce(step.store, { type: "finish-round" }, 14);
+    expect(step.error).toBeUndefined();
+    const table = standings(must(step.store.active, "stats"));
+    for (const id of match.teamA) {
+      expect(table.find((row) => row.playerId === id)?.wins).toBe(1);
+    }
+    for (const id of match.teamB) {
+      expect(table.find((row) => row.playerId === id)?.losses).toBe(1);
+    }
+    let tied = reduce(ready(4, 1), { type: "start-session" }, 20);
+    const tieMatch = must(activeRound(must(tied.store.active, "s"))?.matches[0], "tm");
+    tied = reduce(tied.store, { type: "set-score", matchId: tieMatch.id, side: "A", score: 6 }, 21);
+    tied = reduce(tied.store, { type: "set-score", matchId: tieMatch.id, side: "B", score: 6 }, 22);
+    tied = reduce(tied.store, { type: "end-as-is", matchId: tieMatch.id }, 23);
+    tied = reduce(tied.store, { type: "finish-round" }, 24);
+    const tieTable = standings(must(tied.store.active, "tie"));
+    for (const id of [...tieMatch.teamA, ...tieMatch.teamB]) {
+      const row = tieTable.find((item) => item.playerId === id);
+      expect(row?.games).toBe(1);
+      expect(row?.wins).toBe(0);
+      expect(row?.losses).toBe(0);
+    }
+  });
+
+  it("does not count a break sit against fairness", () => {
+    let step = reduce(ready(6, 1), { type: "start-session" }, 10);
+    const round = must(activeRound(must(step.store.active, "s")), "r");
+    const playerId = must(round.matches[0]?.teamA[0], "player");
+    step = reduce(step.store, { type: "break-next", playerId }, 11);
+    const next = must(step.store.active?.rounds.find((item) => item.number === 2), "next");
+    expect(next.sittingOut).toContain(playerId);
+    expect(next.breakSits).toContain(playerId);
+    for (const match of step.store.active?.rounds[0]?.matches ?? []) {
+      step = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 11 }, 12);
+      step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 4 }, 13);
+    }
+    step = reduce(step.store, { type: "finish-round" }, 14);
+    for (const match of activeRound(must(step.store.active, "live"))?.matches ?? []) {
+      step = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 11 }, 15);
+      step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 3 }, 16);
+    }
+    step = reduce(step.store, { type: "finish-round" }, 17);
+    const state = recompute(must(step.store.active, "after"), 2);
+    expect(state.sched[playerId]?.sitOuts ?? 0).toBe(0);
+    expect(standings(must(step.store.active, "board")).find((row) => row.playerId === playerId)?.sits).toBe(1);
+  });
+
+  it("finishes a final live round before ending so the scores count", () => {
+    let step = reduce(ready(4, 1), { type: "start-session" }, 10);
+    const match = must(activeRound(must(step.store.active, "s"))?.matches[0], "m");
+    step = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 11 }, 11);
+    step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 7 }, 12);
+    step = reduce(step.store, { type: "end-session" }, 13);
+    const saved = must(step.store.past[0], "saved");
+    expect(saved.rounds[0]?.status).toBe("complete");
+    expect(standings(saved).some((row) => row.wins === 1)).toBe(true);
+  });
+
+  it("warns when a finished game is corrected into a score that does not count", () => {
+    let step = reduce(ready(4, 1), { type: "start-session" }, 10);
+    const match = must(activeRound(must(step.store.active, "s"))?.matches[0], "m");
+    step = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 11 }, 11);
+    step = reduce(step.store, { type: "set-score", matchId: match.id, side: "B", score: 8 }, 12);
+    step = reduce(step.store, { type: "finish-round" }, 13);
+    const corrected = reduce(step.store, { type: "set-score", matchId: match.id, side: "A", score: 15 }, 14);
+    expect(corrected.notice).toMatch(/won't count/);
+    expect(standings(must(corrected.store.active, "live")).every((row) => row.wins === 0)).toBe(true);
+  });
+});
+
 describe("session recap", () => {
   it("copies records, games, and point diff without hidden ratings", () => {
     let step = reduce(ready(4, 1), { type: "start-session" }, 10);

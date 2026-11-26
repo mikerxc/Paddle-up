@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { finalScoreIssue, isFinalScore, scoreStatus } from "./scoring.ts";
+import { finalScoreIssue, isFinalScore, quickScores, scoreStatus, winningTotal } from "./scoring.ts";
 
 const to = 11;
 const by = 2;
@@ -46,5 +46,14 @@ describe("exact winning score, win by 2, no cap", () => {
   it("rejects junk scores", () => {
     expect(finalScoreIssue(-1, 11, to, by)).toMatch(/whole numbers/);
     expect(finalScoreIssue(11.5, 9, to, by)).toMatch(/whole numbers/);
+  });
+
+  it("fills the winner from the loser's score and follows the target on the keypad", () => {
+    expect(winningTotal(5, 11, 2)).toBe(11);
+    expect(winningTotal(9, 11, 2)).toBe(11);
+    expect(winningTotal(10, 11, 2)).toBe(12);
+    expect(winningTotal(12, 15, 2)).toBe(15);
+    expect(quickScores(11)).toEqual([11, 12, 13, 15]);
+    expect(quickScores(15)).toEqual([15, 16, 17, 19]);
   });
 });

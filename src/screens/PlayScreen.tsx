@@ -2,8 +2,9 @@ import { useState } from "react";
 import { useApp } from "../app-context.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { Sheet } from "../components/ui/dialog.tsx";
-import { activeRound, presentIds, roundUndoCount } from "../engine/session.ts";
-import { scoreStatus, type ScoreStatus } from "../engine/scoring.ts";
+import { activeRound, presentIds, roundShareText, roundUndoCount } from "../engine/session.ts";
+import { quickScores, scoreStatus, winningTotal, type ScoreStatus } from "../engine/scoring.ts";
+import { shareText } from "../lib/clipboard.ts";
 import { MAX_COURTS, MAX_SCORE, playerName, type Match, type Player, type Round, type Session } from "../model.ts";
 
 export function PlayScreen() {
@@ -13,11 +14,17 @@ export function PlayScreen() {
   const [pad, setPad] = useState<{ matchId: string; side: "A" | "B"; draft: string } | null>(null);
   const [arriveOpen, setArriveOpen] = useState(false);
   const [endOpen, setEndOpen] = useState(false);
+  const [win, setWin] = useState<{ matchId: string; side: "A" | "B"; draft: string } | null>(null);
   if (!session) return null;
   const round = activeRound(session);
   const here = presentIds(session).length;
   const upcoming = session.rounds.filter((item) => item.status === "pending");
   const undoCount = roundUndoCount(store);
+  const nextRound = session.rounds.find((item) => item.status === "pending") ?? null;
+  const roundReady =
+    !!round &&
+    round.matches.length > 0 &&
+    round.matches.every((match) => match.capped || scoreStatus(match.scoreA, match.scoreB, session.rules.pointsToWin, session.rules.winBy) === "final");
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -25,7 +32,7 @@ export function PlayScreen() {
         <div className="flex items-center gap-1.5">
           <Button
             variant="yellow"
-            className="h-10 px-2"
+            className="min-h-12 px-3"
             data-testid="undo"
             disabled={undoCount === 0}
             aria-label={undoCount > 0 ? `Undo ${undoCount} this round` : "Undo"}
@@ -96,6 +103,8 @@ export function PlayScreen() {
                     draft: String(side === "A" ? match.scoreA : match.scoreB),
                   })
                 }
+                onWon={(side) => setWin({ matchId: match.id, side, draft: "0" })}
+                onCap={() => dispatch({ type: "end-as-is", matchId: match.id })}
               />
             ))}
             <section className="rounded-lg border border-ink/50 bg-ball/40 px-2 py-1" data-testid="sitting-strip">
@@ -148,15 +157,6 @@ export function PlayScreen() {
           </section>
         )}
         <div className="grid grid-cols-1 gap-2">
-          {round ? (
-            <Button size="lg" full data-testid="finish-round" onClick={() => dispatch({ type: "finish-round" })}>
-              Finish round
-            </Button>
-          ) : (
-            <Button size="lg" full data-testid="next-round" onClick={() => dispatch({ type: "add-rounds", count: 1 })}>
-              Next round
-            </Button>
-          )}
           <div className="grid grid-cols-2 gap-2">
             <Button size="lg" variant="secondary" data-testid="reshuffle" onClick={() => dispatch({ type: "reshuffle" })}>
               Reshuffle
@@ -174,6 +174,21 @@ export function PlayScreen() {
             </Button>
             <Button size="lg" variant="secondary" data-testid="open-log" onClick={() => dispatch({ type: "nav", view: { name: "log" } })}>
               Log
+            </Button>
+            <Button size="lg" variant="secondary" data-testid="hold-up" onClick={() => dispatch({ type: "nav", view: { name: "nextup" } })}>
+              Hold up next
+            </Button>
+            <Button
+              size="lg"
+              variant="secondary"
+              data-testid="share-next"
+              onClick={() => {
+                const shared = nextRound ?? round;
+                if (!shared) return;
+                void shareText(`Round ${shared.number}`, roundShareText(session, store.players, shared));
+              }}
+            >
+              Share next
             </Button>
           </div>
           <Button size="lg" full variant="clay" data-testid="end-session" onClick={() => setEndOpen(true)}>
@@ -196,6 +211,10 @@ export function PlayScreen() {
           dispatch({ type: "depart", playerId });
           setPicked(null);
         }}
+        onBreak={(playerId) => {
+          dispatch({ type: "break-next", playerId });
+          setPicked(null);
+        }}
       />
       <ArriveSheet
         open={arriveOpen}
@@ -211,7 +230,30 @@ export function PlayScreen() {
           dispatch({ type: "nav", view: { name: "edit", playerId: null, arriveAfter: true } });
         }}
       />
-      <Sheet open={endOpen} onOpenChange={setEndOpen} title="End session?" description="Wins, losses, and the log stay on this phone.">
+      <footer className="sticky bottom-0 z-30 border-t-2 border-ink bg-paper px-2 pt-1 pb-[max(8px,env(safe-area-inset-bottom))]">
+        <p className="text-center text-sm font-black" data-testid="next-line">
+          {nextRound ? `Next: Round ${nextRound.number}` : "Next: add a round"}
+        </p>
+        {round ? (
+          <Button size="lg" full data-testid="finish-round" onClick={() => dispatch({ type: "finish-round" })}>
+            Finish round
+          </Button>
+        ) : (
+          <Button size="lg" full data-testid="next-round" onClick={() => dispatch({ type: "add-rounds", count: 1 })}>
+            Next round
+          </Button>
+        )}
+      </footer>
+      <Sheet
+        open={endOpen}
+        onOpenChange={setEndOpen}
+        title="End session?"
+        description={
+          roundReady
+            ? "This round's scores are finished, so they'll count in the results."
+            : "This round isn't finished. End anyway? These scores won't count."
+        }
+      >
         <Button
           size="lg"
           full
@@ -237,7 +279,65 @@ export function PlayScreen() {
           setPad(null);
         }}
       />
+      <WinSheet
+        win={win}
+        pointsToWin={session.rules.pointsToWin}
+        winBy={session.rules.winBy}
+        onClose={() => setWin(null)}
+        onDraft={(draft) => setWin((current) => (current ? { ...current, draft } : current))}
+        onCommit={(loserScore) => {
+          if (!win) return;
+          dispatch({ type: "award-win", matchId: win.matchId, side: win.side, loserScore });
+          setWin(null);
+        }}
+      />
     </div>
+  );
+}
+
+function WinSheet({
+  win,
+  pointsToWin,
+  winBy,
+  onClose,
+  onDraft,
+  onCommit,
+}: {
+  win: { matchId: string; side: "A" | "B"; draft: string } | null;
+  pointsToWin: number;
+  winBy: number;
+  onClose: () => void;
+  onDraft: (draft: string) => void;
+  onCommit: (loserScore: number) => void;
+}) {
+  const loser = Number(win?.draft ?? "0");
+  const winner = winningTotal(Number.isFinite(loser) ? loser : 0, pointsToWin, winBy);
+  const append = (digit: string) => {
+    if (!win) return;
+    const next = win.draft === "0" ? digit : `${win.draft}${digit}`;
+    const value = Number(next);
+    if (!Number.isFinite(value) || value > MAX_SCORE) return;
+    onDraft(String(value));
+  };
+  return (
+    <Sheet open={!!win} onOpenChange={(open) => !open && onClose()} title="They won" description="Enter the other side's score. This side's score fills in.">
+      <p className="text-center text-lg font-black">
+        Winner {winner} · other {win?.draft ?? "0"}
+      </p>
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        {["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"].map((digit) => (
+          <Button key={digit} size="lg" variant="secondary" className="text-2xl" onClick={() => append(digit)}>
+            {digit}
+          </Button>
+        ))}
+        <Button size="lg" variant="secondary" onClick={() => onDraft("0")}>
+          Clear
+        </Button>
+      </div>
+      <Button className="mt-3" size="lg" full data-testid="award-win" onClick={() => onCommit(Number(win?.draft ?? "0"))}>
+        Set {winner}–{win?.draft ?? "0"}
+      </Button>
+    </Sheet>
   );
 }
 
@@ -249,7 +349,8 @@ function teamLabel(players: Player[], ids: [string, string]) {
   return `${playerName(players, ids[0])} & ${playerName(players, ids[1])}`;
 }
 
-function statusLabel(status: ScoreStatus, winBy: number): string {
+function statusLabel(status: ScoreStatus, winBy: number, capped: boolean): string {
+  if (capped) return "Time-capped";
   if (status === "final") return "Game";
   if (status === "need-margin") return `Win by ${winBy}`;
   if (status === "overshot") return "Check score";
@@ -265,6 +366,8 @@ function MatchCard({
   onPlayer,
   onNudge,
   onOpenPad,
+  onWon,
+  onCap,
 }: {
   match: Match;
   players: Player[];
@@ -273,18 +376,26 @@ function MatchCard({
   onPlayer: (id: string) => void;
   onNudge: (side: "A" | "B", delta: number) => void;
   onOpenPad: (side: "A" | "B") => void;
+  onWon: (side: "A" | "B") => void;
+  onCap: () => void;
 }) {
   const status = scoreStatus(match.scoreA, match.scoreB, pointsToWin, winBy);
   return (
     <section className="overflow-hidden rounded-2xl border-2 border-ink bg-court text-white shadow-[0_4px_0_#1a140c]" data-testid={`court-${match.court}`}>
-      <h2 className="flex items-center justify-center gap-2 bg-[#083820] px-2 py-1.5 text-center text-xs font-black tracking-[0.14em] text-white uppercase">
+      <h2 className="flex items-center justify-center gap-2 bg-[#083820] px-2 py-1 text-center text-xs font-black tracking-[0.12em] text-white uppercase">
         <span data-testid={`score-status-${match.court}`}>
-          Court {match.court} · {statusLabel(status, winBy)}
+          Court {match.court} · {statusLabel(status, winBy, match.capped === true)}
         </span>
         {match.short && (
           <span className="rounded-full bg-ball px-1.5 py-0.5 text-[10px] font-black tracking-normal text-ink normal-case" data-testid={`short-${match.court}`}>
             ratings short
           </span>
+        )}
+        {match.capped && <span className="text-[10px] font-black tracking-normal text-ball normal-case">time-capped</span>}
+        {!match.capped && (
+          <button type="button" className="text-[10px] font-black tracking-normal text-ball normal-case underline" data-testid={`end-as-is-${match.court}`} onClick={onCap}>
+            End as is
+          </button>
         )}
       </h2>
       <CourtSide
@@ -296,6 +407,7 @@ function MatchCard({
         onPlayer={onPlayer}
         onNudge={onNudge}
         onOpenPad={onOpenPad}
+        onWon={onWon}
       />
       <div className="court-net mx-2" role="separator" aria-label="Net" />
       <CourtSide
@@ -307,6 +419,7 @@ function MatchCard({
         onPlayer={onPlayer}
         onNudge={onNudge}
         onOpenPad={onOpenPad}
+        onWon={onWon}
       />
     </section>
   );
@@ -321,6 +434,7 @@ function CourtSide({
   onPlayer,
   onNudge,
   onOpenPad,
+  onWon,
 }: {
   players: Player[];
   ids: [string, string];
@@ -330,15 +444,25 @@ function CourtSide({
   onPlayer: (id: string) => void;
   onNudge: (side: "A" | "B", delta: number) => void;
   onOpenPad: (side: "A" | "B") => void;
+  onWon: (side: "A" | "B") => void;
 }) {
   return (
-    <div className="flex items-center gap-2 px-2 py-2.5">
+    <div className="flex items-center gap-1 px-1.5 py-1.5">
+      <Button
+        variant="secondary"
+        className="h-12 w-12 shrink-0 text-2xl"
+        data-testid={`score-minus-${matchId}-${side}`}
+        aria-label="Minus one"
+        onClick={() => onNudge(side, -1)}
+      >
+        −
+      </Button>
       <div className="flex min-w-0 flex-1 flex-col">
         {ids.map((id) => (
           <button
             key={id}
             type="button"
-            className="min-h-12 truncate text-left text-base font-black text-white"
+            className="min-h-11 truncate text-left text-base font-black text-white"
             onClick={() => onPlayer(id)}
           >
             {labelFor(players, id)}
@@ -347,32 +471,30 @@ function CourtSide({
       </div>
       <button
         type="button"
-        className="min-h-12 min-w-14 text-5xl leading-none font-black tabular-nums text-white"
+        className="min-h-12 min-w-12 text-5xl leading-none font-black tabular-nums text-white"
         aria-label={`Set score ${score}`}
         onClick={() => onOpenPad(side)}
       >
         {score}
       </button>
-      <div className="flex items-center gap-1">
-        <Button
-          variant="yellow"
-          className="h-12 w-12 shrink-0 text-2xl"
-          data-testid={`score-plus-${matchId}-${side}`}
-          aria-label="Plus one"
-          onClick={() => onNudge(side, 1)}
-        >
-          +
-        </Button>
-        <Button
-          variant="secondary"
-          className="h-12 w-12 shrink-0 text-2xl"
-          data-testid={`score-minus-${matchId}-${side}`}
-          aria-label="Minus one"
-          onClick={() => onNudge(side, -1)}
-        >
-          −
-        </Button>
-      </div>
+      <Button
+        variant="yellow"
+        className="h-12 shrink-0 px-2 text-sm"
+        data-testid={`won-${matchId}-${side}`}
+        aria-label="This side won"
+        onClick={() => onWon(side)}
+      >
+        Won
+      </Button>
+      <Button
+        variant="yellow"
+        className="h-12 w-12 shrink-0 text-2xl"
+        data-testid={`score-plus-${matchId}-${side}`}
+        aria-label="Plus one"
+        onClick={() => onNudge(side, 1)}
+      >
+        +
+      </Button>
     </div>
   );
 }
@@ -385,6 +507,7 @@ function PlayerSheet({
   onClose,
   onSwap,
   onLeave,
+  onBreak,
 }: {
   session: Session;
   players: Player[];
@@ -393,6 +516,7 @@ function PlayerSheet({
   onClose: () => void;
   onSwap: (outId: string, inId: string) => void;
   onLeave: (playerId: string) => void;
+  onBreak: (playerId: string) => void;
 }) {
   const player = players.find((item) => item.id === playerId);
   const playing = new Set(round ? round.matches.flatMap((match) => [...match.teamA, ...match.teamB]) : []);
@@ -407,12 +531,16 @@ function PlayerSheet({
     <Sheet open={!!player && !!round} onOpenChange={(open) => !open && onClose()} title={player?.name ?? "Player"}>
       {player && playerId && round && (
         <div className="flex flex-col gap-2">
+          {onCourt && sitters.length > 0 && <p className="font-black">Hurt, sub now</p>}
           {onCourt &&
             sitters.map((id) => (
-              <Button key={id} size="lg" full variant="secondary" onClick={() => onSwap(playerId, id)}>
+              <Button key={id} size="lg" full variant="yellow" onClick={() => onSwap(playerId, id)}>
                 Sub in {playerName(players, id)}
               </Button>
             ))}
+          <Button size="lg" full variant="secondary" data-testid="sit-next" onClick={() => onBreak(playerId)}>
+            Sit next round
+          </Button>
           {!onCourt &&
             othersOnCourt.map((id) => (
               <Button key={id} size="lg" full variant="secondary" onClick={() => onSwap(id, playerId)}>
@@ -524,7 +652,7 @@ function ScorePad({
         </Button>
       </div>
       <div className="mt-3 grid grid-cols-4 gap-2">
-        {[11, 12, 13, 15].map((score) => (
+        {quickScores(session.rules.pointsToWin).map((score) => (
           <Button key={score} size="lg" variant="yellow" onClick={() => onCommit(score)}>
             {score}
           </Button>

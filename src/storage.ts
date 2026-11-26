@@ -83,7 +83,8 @@ function isView(value: unknown): value is View {
     view.name === "stats" ||
     view.name === "log" ||
     view.name === "past" ||
-    view.name === "settings"
+    view.name === "settings" ||
+    view.name === "nextup"
   );
 }
 

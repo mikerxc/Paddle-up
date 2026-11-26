@@ -47,6 +47,11 @@ export function finalScoreIssue(
   return null;
 }
 
+/** Keypad shortcuts that follow the game's target instead of a fixed 11. */
+export function quickScores(pointsToWin: number): number[] {
+  return [pointsToWin, pointsToWin + 1, pointsToWin + 2, pointsToWin + 4].filter((score) => score <= 99);
+}
+
 export function isFinalScore(
   scoreA: number,
   scoreB: number,

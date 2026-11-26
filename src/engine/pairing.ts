@@ -50,6 +50,8 @@ export interface RoundPlan {
   courtsUsed: number;
   matches: PlannedMatch[];
   sittingOut: string[];
+  /** Sits that were a requested break. They do not add to the fairness sit count. */
+  breakSits?: string[];
 }
 
 /**
@@ -272,19 +274,26 @@ function choosePlaying(
       : sampleCombinations(tied, sitCount, fnv(`${roundNumber}#${salt}#${variety}#sit`));
   let bestSit = options[0] ?? [];
   let bestFeasible = Number.POSITIVE_INFINITY;
+  let bestRepeats = Number.POSITIVE_INFINITY;
   let bestHash = Number.POSITIVE_INFINITY;
   let bestKey = "";
+  const satLastRound = (player: EnginePlayer) => schedOf(sched, player.id).lastSatRound === roundNumber - 1;
   for (const sitting of options) {
     const sitIds = new Set(sitting.map((player) => player.id));
     const playing = [...mustPlay, ...tied.filter((player) => !sitIds.has(player.id))];
     const feasible = inwardFeasible(playing) ? 0 : 1;
+    const repeats = sitting.reduce((sum, player) => sum + (satLastRound(player) ? 1 : 0), 0);
     const key = sitting.map((player) => player.id).sort().join(",");
     const hash = fnv(`${key}|${roundNumber}|${salt}|${variety}`);
-    if (
+    const better =
       feasible < bestFeasible ||
-      (feasible === bestFeasible && (hash < bestHash || (hash === bestHash && key < bestKey)))
-    ) {
+      (feasible === bestFeasible && repeats < bestRepeats) ||
+      (feasible === bestFeasible &&
+        repeats === bestRepeats &&
+        (hash < bestHash || (hash === bestHash && key < bestKey)));
+    if (better) {
       bestFeasible = feasible;
+      bestRepeats = repeats;
       bestHash = hash;
       bestKey = key;
       bestSit = sitting;
@@ -714,6 +723,8 @@ export interface PlanVariety {
   avoidKey?: string;
   /** Every lineup already shown for this round. */
   avoidKeys?: readonly string[];
+  /** Players who must sit this round (a break). Fairness still orders everyone else. */
+  mustSit?: readonly string[];
 }
 
 export function planRound(
@@ -725,7 +736,10 @@ export function planRound(
   salt = 1,
   variety?: PlanVariety,
 ): RoundPlan {
-  const spots = courtsFor(players.length, courts) * 4;
+  const forcedIds = new Set(variety?.mustSit ?? []);
+  const forced = players.filter((player) => forcedIds.has(player.id));
+  const pool = forced.length > 0 ? players.filter((player) => !forcedIds.has(player.id)) : players;
+  const spots = courtsFor(pool.length, courts) * 4;
   const avoidFull = new Set<string>();
   if (variety?.avoidKey) avoidFull.add(variety.avoidKey);
   for (const key of variety?.avoidKeys ?? []) avoidFull.add(key);
@@ -736,7 +750,9 @@ export function planRound(
   let chosen: RoundPlan | null = null;
   for (let attempt = 0; attempt < tries; attempt += 1) {
     const twist = attempt === 0 ? baseVariety : fnv(`${baseVariety}#${roundNumber}#${attempt}`) || attempt;
-    const { playing, sittingOut } = choosePlaying(players, sched, spots, roundNumber, salt, twist);
+    const chosenSit = choosePlaying(pool, sched, spots, roundNumber, salt, twist);
+    const { playing } = chosenSit;
+    const sittingOut = [...chosenSit.sittingOut, ...forced.map((player) => player.id)].sort();
     const mix = mixContext(playing, sched, ledger, roundNumber);
     const matches = numberCourts(
       bestAssignment(playing, ledger, mix, {
@@ -750,6 +766,7 @@ export function planRound(
       courtsUsed: playing.length / 4,
       matches,
       sittingOut,
+      breakSits: forced.map((player) => player.id).sort(),
     };
     chosen = plan;
     if (!avoidFull.has(lineupKey(matches, sittingOut))) break;
@@ -760,6 +777,7 @@ export function planRound(
       courtsUsed: 0,
       matches: [],
       sittingOut: players.map((player) => player.id).sort(),
+      breakSits: forced.map((player) => player.id).sort(),
     }
   );
 }
@@ -788,9 +806,10 @@ export function applyRound(
     state.scheduleGames += 1;
     state.lastPlayedRound = plan.roundNumber;
   }
+  const breakSits = new Set(plan.breakSits ?? []);
   for (const id of plan.sittingOut) {
     const state = touch(id);
-    state.sitOuts += 1;
+    if (!breakSits.has(id)) state.sitOuts += 1;
     state.lastSatRound = plan.roundNumber;
   }
   const bump = (map: Record<string, number>, a: string, b: string) => {

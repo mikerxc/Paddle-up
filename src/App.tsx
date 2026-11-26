@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AppContext } from "./app-context.tsx";
 import { actionReplans, runPlanned } from "./engine/planner-client.ts";
 import { reduce, type Action, type StepResult } from "./engine/session.ts";
-import { playRoundCue } from "./lib/sound.ts";
+import { playRoundCue, unlockAudio } from "./lib/sound.ts";
 import { loadStore, saveStore } from "./storage.ts";
 import { CheckInScreen } from "./screens/CheckInScreen.tsx";
 import { HomeScreen } from "./screens/HomeScreen.tsx";
@@ -10,6 +10,7 @@ import { PlayScreen } from "./screens/PlayScreen.tsx";
 import { EditPlayerScreen, RosterScreen } from "./screens/RosterScreen.tsx";
 import { LogScreen, PastScreen, StatsScreen } from "./screens/ReviewScreens.tsx";
 import { SettingsScreen } from "./screens/SettingsScreen.tsx";
+import { NextUpScreen } from "./screens/NextUpScreen.tsx";
 
 export default function App() {
   const [store, setStore] = useState(loadStore);
@@ -18,8 +19,10 @@ export default function App() {
   const [saveFailed, setSaveFailed] = useState(false);
   const [planning, setPlanning] = useState(false);
   const [hostUnlocked, setHostUnlocked] = useState(false);
+  const [flash, setFlash] = useState(false);
   const storeRef = useRef(store);
   const planningRef = useRef(false);
+  const queueRef = useRef<Action[]>([]);
 
   useEffect(() => {
     if (!notice) return;
@@ -27,30 +30,51 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
+  useEffect(() => {
+    const unlock = () => unlockAudio();
+    window.addEventListener("pointerdown", unlock);
+    return () => window.removeEventListener("pointerdown", unlock);
+  }, []);
+
   const applyResult = (result: StepResult) => {
     storeRef.current = result.store;
     setStore(result.store);
     setError(result.error ?? null);
     if (result.notice) setNotice(result.notice);
-    if (result.cue) playRoundCue(result.store.settings);
+    if (result.cue) {
+      playRoundCue(result.store.settings);
+      setFlash(true);
+      window.setTimeout(() => setFlash(false), 220);
+    }
     setSaveFailed(!saveStore(result.store));
   };
 
-  const dispatch = (action: Action) => {
-    if (planningRef.current) return;
+  const runAction = (action: Action) => {
     const current = storeRef.current;
     if (!actionReplans(action, current)) {
       applyResult(reduce(current, action));
+      const next = queueRef.current.shift();
+      if (next) runAction(next);
       return;
     }
     planningRef.current = true;
     setPlanning(true);
     const now = Date.now();
     void runPlanned(current, action, now).then((result) => {
+      applyResult(result);
       planningRef.current = false;
       setPlanning(false);
-      applyResult(result);
+      const next = queueRef.current.shift();
+      if (next) runAction(next);
     });
+  };
+
+  const dispatch = (action: Action) => {
+    if (planningRef.current) {
+      queueRef.current.push(action);
+      return;
+    }
+    runAction(action);
   };
 
   const view = store.view.name;
@@ -96,6 +120,8 @@ export default function App() {
           {view === "log" && <LogScreen />}
           {view === "past" && <PastScreen />}
           {view === "settings" && <SettingsScreen />}
+          {view === "nextup" && <NextUpScreen />}
+          {flash && <div className="pointer-events-none fixed inset-0 z-50 bg-ball/70" data-testid="round-flash" />}
         </div>
       </div>
     </AppContext.Provider>

@@ -2,9 +2,22 @@ import { useEffect, useRef, useState } from "react";
 import { useApp } from "../app-context.tsx";
 import { Screen } from "../components/Bits.tsx";
 import { Button } from "../components/ui/button.tsx";
-import { copyText } from "../lib/clipboard.ts";
-import { sessionRecap, sortStandings, standings } from "../engine/session.ts";
+import { shareText } from "../lib/clipboard.ts";
+import { fairnessReport, sessionRecap, sortStandings, standings } from "../engine/session.ts";
+import { buildBackup, parseBackup } from "../storage.ts";
 import { playerName, type Session } from "../model.ts";
+
+function downloadBackup(text: string) {
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "paddle-up-backup.json";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
 
 function findSession(storeSession: Session | null, past: Session[], sessionId: string | null): Session | null {
   if (sessionId === null) return storeSession;
@@ -12,8 +25,9 @@ function findSession(storeSession: Session | null, past: Session[], sessionId: s
 }
 
 export function StatsScreen() {
-  const { store, dispatch } = useApp();
-  const [copyLabel, setCopyLabel] = useState("Copy recap");
+  const { store, dispatch, hostUnlocked } = useApp();
+  const [copyLabel, setCopyLabel] = useState("Share recap");
+  const fileRef = useRef<HTMLInputElement>(null);
   const sessionId = store.view.name === "stats" ? store.view.sessionId : null;
   const session = findSession(store.active, store.past, sessionId);
   const readOnly = !store.active || session?.id !== store.active.id;
@@ -32,7 +46,8 @@ export function StatsScreen() {
       onBack={() => dispatch({ type: "nav", view: readOnly ? { name: "past" } : { name: "play" } })}
     >
       <p className="text-lg font-semibold">
-        {finished} finished {finished === 1 ? "round" : "rounds"}. Wins, losses, games played, and point margin.
+        {finished} finished {finished === 1 ? "round" : "rounds"}. Ranked by win percentage.
+        {session.rounds.some((round) => round.matches.some((match) => match.capped)) ? " Some games were time-capped." : ""}
         {readOnly ? " This session is saved on this phone." : " Only finished rounds count."}
       </p>
       <Button
@@ -41,9 +56,9 @@ export function StatsScreen() {
         variant="yellow"
         data-testid="copy-recap"
         onClick={() => {
-          void copyText(sessionRecap(session, store.players)).then((ok) => {
-            setCopyLabel(ok ? "Copied!" : "Couldn't copy");
-            window.setTimeout(() => setCopyLabel("Copy recap"), 2000);
+          void shareText(session.title, sessionRecap(session, store.players)).then((result) => {
+            setCopyLabel(result === "shared" ? "Shared" : result === "copied" ? "Copied" : "Couldn't share");
+            window.setTimeout(() => setCopyLabel("Share recap"), 2000);
           });
         }}
       >
@@ -65,12 +80,72 @@ export function StatsScreen() {
                   <p className={`text-3xl font-black tabular-nums ${row.diff > 0 ? "text-court" : row.diff < 0 ? "text-clay" : ""}`}>{diff}</p>
                 </div>
                 <p className="text-lg font-semibold">
-                  {row.games === 0 ? "Hasn't finished a game" : `${row.wins} wins · ${row.losses} losses · ${row.games} played`}
+                  {row.games === 0
+                    ? `No finished games · sat ${row.sits}`
+                    : `${Math.round((row.wins / row.games) * 100)}% · ${row.wins}-${row.losses} · ${row.games} played · sat ${row.sits}`}
                 </p>
               </li>
             );
           })}
         </ol>
+      )}
+      {hostUnlocked && (
+        <p className="rounded-2xl border-2 border-dashed border-ink bg-card p-3 font-semibold" data-testid="fairness-line">
+          {fairnessReport(session, store.players)}
+        </p>
+      )}
+      {readOnly && (
+        <div className="flex flex-col gap-2">
+          <Button
+            size="lg"
+            full
+            data-testid="save-backup"
+            onClick={() => {
+              const backup = buildBackup(store);
+              const text = JSON.stringify(backup, null, 2);
+              const file = new File([text], "paddle-up-backup.json", { type: "application/json" });
+              const shareFile = typeof navigator.canShare === "function" && navigator.canShare({ files: [file] });
+              if (shareFile) {
+                void navigator.share({ files: [file], title: "Paddle Up backup" }).catch(() => downloadBackup(text));
+                return;
+              }
+              downloadBackup(text);
+            }}
+          >
+            Save backup
+          </Button>
+          <Button size="lg" full variant="secondary" data-testid="import-backup-results" onClick={() => fileRef.current?.click()}>
+            Import backup
+          </Button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/json,.json"
+            className="sr-only"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (!file) return;
+              void file.text().then((text) => {
+                try {
+                  const result = parseBackup(JSON.parse(text) as unknown);
+                  if (!result.ok) return;
+                  dispatch({
+                    type: "import-backup",
+                    players: result.backup.players,
+                    settings: result.backup.settings,
+                    past: result.backup.past,
+                    active: result.backup.active,
+                    checkedIn: result.backup.checkedIn,
+                    skillLog: result.backup.skillLog,
+                  });
+                } catch {
+                  /* The settings screen explains a bad file. This button stays quiet. */
+                }
+              });
+            }}
+          />
+        </div>
       )}
       {readOnly && (
         <>

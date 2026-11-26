@@ -11,6 +11,8 @@ export function actionReplans(action: Action, store: Store): boolean {
     case "arrive":
     case "depart":
     case "swap":
+    case "break-next":
+    case "end-session":
       return true;
     case "add-player":
       return action.arriveAfter && !!store.active;

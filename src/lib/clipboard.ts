@@ -1,3 +1,16 @@
+/** Shares plain text, then copies it if the share sheet isn't available. */
+export async function shareText(title: string, text: string): Promise<"shared" | "copied" | "failed"> {
+  try {
+    if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
+      await navigator.share({ title, text });
+      return "shared";
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") return "failed";
+  }
+  return (await copyText(text)) ? "copied" : "failed";
+}
+
 /** Copies plain text. Uses the clipboard API, then a hidden selection if that is unavailable. */
 export async function copyText(text: string): Promise<boolean> {
   try {

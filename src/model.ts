@@ -32,6 +32,8 @@ export interface Match {
   scoreB: number;
   /** True when this game was built below the 5.0 team-total floor. */
   short?: boolean;
+  /** Host ended the game as it stood. The leading score counts; a tie is played with no win or loss. */
+  capped?: boolean;
 }
 
 export interface Round {
@@ -39,6 +41,8 @@ export interface Round {
   number: number;
   matches: Match[];
   sittingOut: string[];
+  /** Players whose sit this round is a break and does not count toward fairness. */
+  breakSits?: string[];
   status: "pending" | "active" | "complete";
 }
 
@@ -83,6 +87,8 @@ export interface Session {
   log: LogEntry[];
   /** Lineup keys already shown for each round number. Reshuffle avoids all of them. */
   lineupMemory?: Record<string, string[]>;
+  /** A player sits one future round, then returns. That sit is not a fairness sit. */
+  breaks?: { playerId: string; roundNumber: number }[];
 }
 
 /** A quiet record of hidden-skill changes. Shown nowhere in the app. */
@@ -103,7 +109,8 @@ export type View =
   | { name: "stats"; sessionId: string | null }
   | { name: "log" }
   | { name: "past" }
-  | { name: "settings" };
+  | { name: "settings" }
+  | { name: "nextup" };
 
 /** One undo step. `patch` restores the previous store without copying untouched data. */
 export interface UndoStep {

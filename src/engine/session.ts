@@ -23,7 +23,7 @@ import {
   type UndoStep,
   type View,
 } from "../model.ts";
-import { finalScoreIssue, isFinalScore } from "./scoring.ts";
+import { finalScoreIssue, isFinalScore, winningTotal } from "./scoring.ts";
 import { applyPatch, diffValue } from "./undo.ts";
 import {
   applyRound,
@@ -69,6 +69,9 @@ export type Action =
   | { type: "arrive"; playerId: string }
   | { type: "depart"; playerId: string }
   | { type: "finish-round" }
+  | { type: "end-as-is"; matchId: string }
+  | { type: "break-next"; playerId: string }
+  | { type: "award-win"; matchId: string; side: "A" | "B"; loserScore: number }
   | { type: "end-session" }
   | { type: "delete-past"; sessionId: string }
   | { type: "undo" };
@@ -158,6 +161,7 @@ function toPlan(round: Round): RoundPlan {
       teamA: [...match.teamA] as [string, string],
       teamB: [...match.teamB] as [string, string],
     })),
+    breakSits: [...(round.breakSits ?? [])],
   };
 }
 
@@ -167,6 +171,7 @@ function fromPlan(plan: RoundPlan, status: Round["status"]): Round {
     number: plan.roundNumber,
     status,
     sittingOut: [...plan.sittingOut],
+    breakSits: [...(plan.breakSits ?? [])],
     matches: plan.matches.map((match) => ({
       id: newId(),
       court: match.court,
@@ -192,9 +197,13 @@ function planFrom(
   for (let offset = 0; offset < count; offset += 1) {
     const roundNumber = startNumber + offset;
     const eligible = eligiblePlayers(session, players, roundNumber);
+    const mustSit = (session.breaks ?? [])
+      .filter((item) => item.roundNumber === roundNumber && eligible.some((player) => player.id === item.playerId))
+      .map((item) => item.playerId);
     const plan = planRound(eligible, sched, ledger, session.rules.courts, roundNumber, session.salt, {
       variety,
       avoidKeys: avoid?.get(roundNumber) ?? [],
+      mustSit,
     });
     plans.push(plan);
     const applied = applyRound(sched, ledger, plan);
@@ -492,6 +501,7 @@ export interface Standing {
   pointsAgainst: number;
   diff: number;
   games: number;
+  sits: number;
 }
 
 export function standings(session: Session): Standing[] {
@@ -507,6 +517,7 @@ export function standings(session: Session): Standing[] {
       pointsAgainst: 0,
       diff: 0,
       games: 0,
+      sits: 0,
     };
     table.set(id, created);
     return created;
@@ -514,21 +525,25 @@ export function standings(session: Session): Standing[] {
   for (const att of session.attendance) ensure(att.playerId);
   for (const round of session.rounds) {
     if (round.status !== "complete") continue;
+    for (const id of round.sittingOut) ensure(id).sits += 1;
     for (const match of round.matches) {
-      if (!isFinalScore(match.scoreA, match.scoreB, session.rules.pointsToWin, session.rules.winBy)) continue;
-      const apply = (ids: [string, string], scored: number, allowed: number) => {
+      const cappedTie = match.capped === true && match.scoreA === match.scoreB;
+      const counts = match.capped === true || isFinalScore(match.scoreA, match.scoreB, session.rules.pointsToWin, session.rules.winBy);
+      if (!counts) continue;
+      const apply = (ids: [string, string], scored: number, allowed: number, award: boolean) => {
         for (const id of ids) {
           const row = ensure(id);
           row.games += 1;
           row.pointsFor += scored;
           row.pointsAgainst += allowed;
           row.diff = row.pointsFor - row.pointsAgainst;
+          if (!award) continue;
           if (scored > allowed) row.wins += 1;
-          else row.losses += 1;
+          else if (scored < allowed) row.losses += 1;
         }
       };
-      apply(match.teamA, match.scoreA, match.scoreB);
-      apply(match.teamB, match.scoreB, match.scoreA);
+      apply(match.teamA, match.scoreA, match.scoreB, !cappedTie);
+      apply(match.teamB, match.scoreB, match.scoreA, !cappedTie);
     }
   }
   return [...table.values()];
@@ -586,6 +601,12 @@ export function reduce(store: Store, action: Action, now = Date.now()): StepResu
       return depart(store, action.playerId, now);
     case "finish-round":
       return finishRound(store, now);
+    case "end-as-is":
+      return endAsIs(store, action.matchId, now);
+    case "break-next":
+      return breakNext(store, action.playerId, now);
+    case "award-win":
+      return awardWin(store, action, now);
     case "end-session":
       return endSession(store, now);
     case "delete-past":
@@ -805,6 +826,7 @@ function writeScore(
   const updated = updateScore(session, matchId, side, score);
   if (!updated) return fail(store, "Couldn't find that game.");
   let next = updated;
+  let notice: string | undefined;
   if (found.round.status === "complete") {
     const match = findMatch(next, matchId)?.match;
     if (match) {
@@ -813,9 +835,69 @@ function writeScore(
         now,
         `Corrected court ${match.court} to ${match.scoreA}–${match.scoreB}.`,
       );
+      if (!match.capped && !isFinalScore(match.scoreA, match.scoreB, session.rules.pointsToWin, session.rules.winBy)) {
+        notice = `Court ${match.court} won't count until the score is a finished game.`;
+      }
     }
   }
-  return commit(store, replaceSession(store, next));
+  return commit(store, replaceSession(store, next), { notice });
+}
+
+function awardWin(store: Store, action: Extract<Action, { type: "award-win" }>, now: number): StepResult {
+  const session = requireSession(store);
+  if (!session) return fail(store, "There's no live session.");
+  const found = findMatch(session, action.matchId);
+  if (!found || found.round.status !== "active") return fail(store, "That game isn't on the court right now.");
+  const loser = clampInt(action.loserScore, 0, MAX_SCORE);
+  const winner = Math.min(MAX_SCORE, winningTotal(loser, session.rules.pointsToWin, session.rules.winBy));
+  let next = updateScore(session, action.matchId, action.side, winner);
+  if (!next) return fail(store, "Couldn't find that game.");
+  const other = action.side === "A" ? "B" : "A";
+  next = updateScore(next, action.matchId, other, loser) ?? next;
+  next = appendLog(next, now, `Court ${found.match.court} won ${winner}–${loser}.`);
+  return commit(store, replaceSession(store, next), { notice: `Entered ${winner}–${loser}.` });
+}
+
+function endAsIs(store: Store, matchId: string, now: number): StepResult {
+  const session = requireSession(store);
+  if (!session) return fail(store, "There's no live session.");
+  const found = findMatch(session, matchId);
+  if (!found || found.round.status !== "active") return fail(store, "That game isn't on the court right now.");
+  const rounds = session.rounds.map((round) => {
+    if (round.id !== found.round.id) return round;
+    return {
+      ...round,
+      matches: round.matches.map((match) => (match.id === matchId ? { ...match, capped: true } : match)),
+    };
+  });
+  const next = appendLog(
+    { ...session, rounds },
+    now,
+    `Court ${found.match.court} time-capped at ${found.match.scoreA}–${found.match.scoreB}.`,
+  );
+  return commit(store, replaceSession(store, next), { notice: "Time-capped. The leading score counts." });
+}
+
+function breakNext(store: Store, playerId: string, now: number): StepResult {
+  const session = requireSession(store);
+  if (!session) return fail(store, "There's no live session.");
+  const player = store.players.find((item) => item.id === playerId);
+  if (!player) return fail(store, "That player isn't in Players.");
+  const current = activeRound(session);
+  const target = current ? current.number + 1 : (session.rounds.find((round) => round.status !== "complete")?.number ?? 1);
+  const breaks = [...(session.breaks ?? []).filter((item) => item.playerId !== playerId), { playerId, roundNumber: target }];
+  let draft: Session = { ...session, breaks };
+  const open = draft.rounds.some((round) => round.number >= target && round.status !== "complete");
+  if (open && current && target > current.number) {
+    draft = reshuffleAfter(draft, store.players, current.number, now, `${player.name} will sit round ${target}.`);
+  } else if (open) {
+    draft = reshuffleUnlocked(draft, store.players, now, `${player.name} will sit round ${target}.`);
+  } else {
+    draft = appendLog(draft, now, `${player.name} will sit round ${target}.`);
+  }
+  return commit(store, replaceSession(store, draft), {
+    notice: `${player.name} sits the next round, then comes back. That sit won't count against them.`,
+  });
 }
 
 function swap(store: Store, action: Extract<Action, { type: "swap" }>, now: number): StepResult {
@@ -1051,15 +1133,27 @@ function depart(store: Store, playerId: string, now: number): StepResult {
   });
 }
 
-function finishRound(store: Store, now: number): StepResult {
-  const session = requireSession(store);
-  if (!session) return fail(store, "There's no live session.");
+function roundReady(round: Round, rules: Session["rules"]): boolean {
+  return (
+    round.matches.length > 0 &&
+    round.matches.every(
+      (match) => match.capped === true || isFinalScore(match.scoreA, match.scoreB, rules.pointsToWin, rules.winBy),
+    )
+  );
+}
+
+function advanceRound(
+  session: Session,
+  players: readonly Player[],
+  now: number,
+): { session: Session; error?: string; cue: boolean } {
   const round = activeRound(session);
-  if (!round) return fail(store, "Add another round when you're ready.");
-  if (round.matches.length === 0) return fail(store, "Need 4 players on court to finish a round.");
+  if (!round) return { session, error: "Add another round when you're ready.", cue: false };
+  if (round.matches.length === 0) return { session, error: "Need 4 players on court to finish a round.", cue: false };
   for (const match of round.matches) {
+    if (match.capped) continue;
     const issue = finalScoreIssue(match.scoreA, match.scoreB, session.rules.pointsToWin, session.rules.winBy);
-    if (issue) return fail(store, `Court ${match.court}: ${issue}`);
+    if (issue) return { session, error: `Court ${match.court}: ${issue}`, cue: false };
   }
   const rounds = session.rounds.map((item) => {
     if (item.id !== round.id) return item;
@@ -1071,26 +1165,44 @@ function finishRound(store: Store, now: number): StepResult {
     rounds[finishedIndex + 1] = { ...nextRound, status: "active" };
   }
   const finished = rounds[finishedIndex] ?? round;
-  let next = appendLog({ ...session, rounds }, now, describeRound(store.players, { ...finished, status: "complete" }, true));
-  next = topUp(next, store.players, now);
+  let next = appendLog({ ...session, rounds }, now, describeRound(players, { ...finished, status: "complete" }, true));
+  next = topUp(next, players, now);
   const live = next.rounds.find((item) => item.status === "active");
-  if (live) next = appendLog(next, now, `Round ${live.number} is up. ${describeRound(store.players, live, false)}`);
-  return commit(store, replaceSession(store, next), {
-    cue: !!live,
+  if (live) next = appendLog(next, now, `Round ${live.number} is up. ${describeRound(players, live, false)}`);
+  return { session: next, cue: !!live };
+}
+
+function finishRound(store: Store, now: number): StepResult {
+  const session = requireSession(store);
+  if (!session) return fail(store, "There's no live session.");
+  const done = advanceRound(session, store.players, now);
+  if (done.error) return fail(store, done.error);
+  const live = done.session.rounds.some((item) => item.status === "active");
+  return commit(store, replaceSession(store, done.session), {
+    cue: done.cue,
     notice: live ? "Next round is up." : "Planned rounds are done. Tap Next round to keep going.",
   });
 }
 
 function endSession(store: Store, now: number): StepResult {
-  const session = requireSession(store);
-  if (!session) return fail(store, "There's no live session.");
+  const current = requireSession(store);
+  if (!current) return fail(store, "There's no live session.");
+  let session = current;
+  let cue = false;
+  const round = activeRound(session);
+  if (round && roundReady(round, session.rules)) {
+    const done = advanceRound(session, store.players, now);
+    if (done.error) return fail(store, done.error);
+    session = done.session;
+    cue = done.cue;
+  }
   const ended: Session = appendLog({ ...session, endedAt: now }, now, "Session ended.");
   const past = [ended, ...store.past].slice(0, PAST_LIMIT);
   const checkedIn = presentIds(ended);
   return commit(
     store,
     { ...store, active: null, past, checkedIn, view: { name: "stats", sessionId: ended.id } },
-    { includePast: true, notice: "Session saved on this phone." },
+    { includePast: true, cue, notice: "Session saved on this phone." },
   );
 }
 
@@ -1103,15 +1215,75 @@ function deletePast(store: Store, sessionId: string): StepResult {
 
 export function sortStandings(rows: Standing[], players: readonly Player[]): Standing[] {
   const names = new Map(players.map((player) => [player.id, player.name]));
+  const rate = (row: Standing) => (row.games === 0 ? -1 : row.wins / row.games);
   return [...rows].sort((a, b) => {
+    const pace = rate(b) - rate(a);
+    if (pace !== 0) return pace;
     if (b.wins !== a.wins) return b.wins - a.wins;
     if (b.diff !== a.diff) return b.diff - a.diff;
     return (names.get(a.playerId) ?? "").localeCompare(names.get(b.playerId) ?? "");
   });
 }
 
+export function fairnessReport(session: Session, players: readonly Player[]): string {
+  const names = new Map(players.map((player) => [player.id, player.name]));
+  const nameOf = (id: string) => names.get(id) ?? "Player";
+  const sits = new Map<string, number>();
+  const played = new Map<string, number[]>();
+  for (const round of session.rounds) {
+    if (round.status !== "complete") continue;
+    for (const id of round.sittingOut) sits.set(id, (sits.get(id) ?? 0) + 1);
+    for (const id of round.matches.flatMap((match) => [...match.teamA, ...match.teamB])) {
+      const list = played.get(id) ?? [];
+      list.push(round.number);
+      played.set(id, list);
+    }
+  }
+  const mostSits = Math.max(0, ...sits.values());
+  const sitters = [...sits.entries()].filter(([, count]) => count === mostSits && count > 0).map(([id]) => nameOf(id));
+  const streakOf = (rounds: number[]) => {
+    const sorted = [...rounds].sort((a, b) => a - b);
+    let best = 0;
+    let run = 0;
+    let previous = Number.NEGATIVE_INFINITY;
+    for (const number of sorted) {
+      run = number === previous + 1 ? run + 1 : 1;
+      previous = number;
+      best = Math.max(best, run);
+    }
+    return best;
+  };
+  let longest = 0;
+  for (const rounds of played.values()) longest = Math.max(longest, streakOf(rounds));
+  const runners = [...played.entries()].filter(([, rounds]) => streakOf(rounds) === longest && longest > 0).map(([id]) => nameOf(id));
+  const { ledger } = recompute(session, Number.MAX_SAFE_INTEGER);
+  let partnerCount = 0;
+  let partnerLabel = "nobody yet";
+  for (const [key, count] of Object.entries(ledger.partners)) {
+    if (count <= partnerCount) continue;
+    partnerCount = count;
+    const [left, right] = key.split("|");
+    partnerLabel = `${nameOf(left ?? "")} & ${nameOf(right ?? "")}`;
+  }
+  const sitLine = sitters.length ? `${sitters.join(", ")} (${mostSits})` : "nobody";
+  const runLine = runners.length ? `${runners.join(", ")} (${longest})` : "nobody";
+  const partnerLine = partnerCount > 0 ? `${partnerLabel} (${partnerCount})` : "nobody yet";
+  return `Most sits: ${sitLine}. Most repeated partners: ${partnerLine}. Longest run: ${runLine}.`;
+}
+
 export function rosterPlayers(store: Store): Player[] {
   return [...store.players].sort(byName);
+}
+
+export function roundShareText(session: Session, players: readonly Player[], round: Round): string {
+  const courts = round.matches.map((match) => {
+    const team = (ids: [string, string]) => `${playerName(players, ids[0])} & ${playerName(players, ids[1])}`;
+    return `Court ${match.court}\n${team(match.teamA)}\nvs\n${team(match.teamB)}`;
+  });
+  const bench = round.sittingOut.length
+    ? `Sitting: ${round.sittingOut.map((id) => playerName(players, id)).join(", ")}`
+    : "Nobody sitting";
+  return [session.title, `Round ${round.number}`, ...courts, bench].join("\n\n");
 }
 
 export function sessionRecap(session: Session, players: readonly Player[]): string {
@@ -1127,11 +1299,12 @@ export function sessionRecap(session: Session, players: readonly Player[]): stri
     lines.push("No finished games.");
     return lines.join("\n");
   }
-  lines.push("Player — record, games played, point diff");
+  lines.push("Player — win %, record, games played, times sat, point diff");
   rows.forEach((row, index) => {
     const diff = row.diff > 0 ? `+${row.diff}` : String(row.diff);
     const record = row.games === 0 ? "no games" : `${row.wins}-${row.losses}`;
-    lines.push(`${index + 1}. ${playerName(players, row.playerId)} — ${record}, ${row.games} played, ${diff}`);
+    const percent = row.games === 0 ? "—" : `${Math.round((row.wins / row.games) * 100)}%`;
+    lines.push(`${index + 1}. ${playerName(players, row.playerId)} — ${percent}, ${record}, ${row.games} played, sat ${row.sits}, ${diff}`);
   });
   return lines.join("\n");
 }
