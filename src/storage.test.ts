@@ -85,6 +85,7 @@ describe("storage", () => {
     const loaded = loadStore(memory);
     expect(loaded.settings.hostSkills).toBe(false);
     expect(loaded.settings.defaultSkill).toBe(3);
+    expect(loaded.settings).not.toHaveProperty("vibrateOn");
     expect(loaded.players[0]?.skill).toBe(3.2);
     expect(loaded.players[0]).not.toHaveProperty("gender");
     expect(loaded.active?.id).toBe("s");

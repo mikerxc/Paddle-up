@@ -54,9 +54,6 @@ export function SettingsScreen() {
       <Button size="lg" full variant={settings.soundOn ? "default" : "secondary"} onClick={() => set({ soundOn: !settings.soundOn })}>
         Sound {settings.soundOn ? "on" : "off"}
       </Button>
-      <Button size="lg" full variant={settings.vibrateOn ? "default" : "secondary"} onClick={() => set({ vibrateOn: !settings.vibrateOn })}>
-        Vibration {settings.vibrateOn ? "on" : "off"}
-      </Button>
       <Button size="lg" full variant="yellow" data-testid="test-sound" onClick={() => playRoundCue(store.settings)}>
         Test the round cue
       </Button>

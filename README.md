@@ -42,7 +42,6 @@ Chosen so nothing is hard-coded in silence:
 | Starting hidden skill for a new player | **3.0** |
 | Rounds planned at the start | **4**. Finishing a round tops the upcoming list back up to **8**. **Add round** adds one more with no cap |
 | Sound when a round is ready | **On** |
-| Vibration when a round is ready (`navigator.vibrate` where the phone allows it) | **On** |
 | Points-to-win and win-by | Editable in Settings, starting at 11 and 2 |
 | Host skill controls | **Off**. Enter PIN **000** in Settings to view or set a hidden skill. **Lock** hides the numbers again. |
 | Undo history | **50** compact steps for the open round. The button is greyed once the next round starts, and it does not undo that boundary. |

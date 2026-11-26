@@ -21,7 +21,6 @@ export interface Settings {
   /** Host-only preference. Numbers still stay hidden until the PIN unlocks this visit. */
   hostSkills: boolean;
   soundOn: boolean;
-  vibrateOn: boolean;
 }
 
 export interface Match {
@@ -141,7 +140,6 @@ export const defaultSettings: Settings = {
   defaultSkill: 3.0,
   hostSkills: false,
   soundOn: true,
-  vibrateOn: true,
 };
 
 export function clampRating(value: number): number {
@@ -185,7 +183,6 @@ export function sanitizeSettings(input: Partial<Settings> | undefined): Settings
     defaultSkill: clampSkill(raw.defaultSkill ?? defaultSettings.defaultSkill),
     hostSkills: raw.hostSkills === true,
     soundOn: raw.soundOn ?? defaultSettings.soundOn,
-    vibrateOn: raw.vibrateOn ?? defaultSettings.vibrateOn,
   };
 }
 

@@ -1,0 +1,9 @@
+Pickleball photograph
+
+Source: https://commons.wikimedia.org/wiki/File:Pickleball_ball.jpg
+Author: E is for Ian
+License: Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
+https://creativecommons.org/licenses/by-sa/4.0/
+
+The file in this folder is a cropped, background-removed derivative of that photograph.
+The derivative stays under CC BY-SA 4.0. Changes: square crop centered on the ball, wood background removed.

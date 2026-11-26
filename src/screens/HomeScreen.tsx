@@ -1,3 +1,4 @@
+import ballUrl from "../assets/pickleball.webp";
 import { presentIds } from "../engine/session.ts";
 import { useApp } from "../app-context.tsx";
 import { Button } from "../components/ui/button.tsx";
@@ -56,28 +57,14 @@ export function HomeScreen() {
   );
 }
 
+/** Photo: E is for Ian, CC BY-SA 4.0. See src/assets/pickleball-license.txt. */
 function Pickleball() {
-  const holes = [
-    [40.2, 25.7], [53.4, 25.7], [66.6, 25.7], [79.8, 25.7],
-    [33.6, 37.1], [46.8, 37.1], [60, 37.1], [73.2, 37.1], [86.4, 37.1],
-    [27, 48.6], [40.2, 48.6], [53.4, 48.6], [66.6, 48.6], [79.8, 48.6], [93, 48.6],
-    [20.4, 60], [33.6, 60], [46.8, 60], [60, 60], [73.2, 60], [86.4, 60], [99.6, 60],
-    [27, 71.4], [40.2, 71.4], [53.4, 71.4], [66.6, 71.4], [79.8, 71.4], [93, 71.4],
-    [33.6, 82.9], [46.8, 82.9], [60, 82.9], [73.2, 82.9], [86.4, 82.9],
-    [40.2, 94.3], [53.4, 94.3], [66.6, 94.3], [79.8, 94.3],
-  ];
   return (
-    <svg
-      viewBox="0 0 120 120"
+    <img
+      src={ballUrl}
+      alt=""
       className="pointer-events-none absolute top-2 right-2 h-28 w-28 drop-shadow-[2px_3px_0_rgba(0,0,0,0.35)]"
       aria-hidden="true"
-    >
-      <circle cx="60" cy="60" r="52" fill="#f0c014" />
-      <ellipse cx="44" cy="40" rx="20" ry="14" fill="#ffe56a" />
-      {holes.map(([cx, cy]) => (
-        <circle key={`${cx}-${cy}`} cx={cx} cy={cy} r="4.6" fill="#1a140c" />
-      ))}
-      <circle cx="60" cy="60" r="52" fill="none" stroke="#1a140c" strokeWidth="4" />
-    </svg>
+    />
   );
 }

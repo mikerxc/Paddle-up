@@ -25,14 +25,7 @@ function tone(ctx: AudioContext, frequency: number, when: number, duration: numb
   osc.stop(when + duration + 0.02);
 }
 
-export function playRoundCue(settings: Pick<Settings, "soundOn" | "vibrateOn">) {
-  if (settings.vibrateOn && typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
-    try {
-      navigator.vibrate([45, 50, 45, 50, 90]);
-    } catch {
-      /* Some browsers expose vibrate and then refuse it. */
-    }
-  }
+export function playRoundCue(settings: Pick<Settings, "soundOn">) {
   if (!settings.soundOn) return;
   const ctx = context();
   if (!ctx) return;
